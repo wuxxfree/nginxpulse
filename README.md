@@ -304,3 +304,15 @@ volumes:
 ---
 
 如需更详细的统计口径或 API 扩展，建议从 `internal/analytics/` 与 `internal/web/handler.go` 开始。
+
+## 写在最后
+
+本项目大部分代码通过codex生成，我投喂了很多开源项目和资料让他做参考，在此感谢大家对开源社区的贡献。
+
+* [有没有好用的 nginx 日志看板展示项目](https://v2ex.com/t/1178789)
+* [nixvis](https://github.com/BeyondXinXin/nixvis)
+* [goaccess](https://github.com/allinurl/goaccess)
+* [prometheus监控nginx的两种方式原创](https://blog.csdn.net/lvan_test/article/details/123579531)
+* [通过nginx-prometheus-exporter监控nginx指标](https://maxidea.gitbook.io/k8s-testing/prometheus-he-grafana-de-dan-ji-bian-pai/tong-guo-nginxprometheusexporter-jian-kong-nginx)
+* [Prometheus 监控nginx服务 ](https://www.cnblogs.com/zmh520/p/17758730.html)
+* [Prometheus监控Nginx](https://zhuanlan.zhihu.com/p/460300628)
