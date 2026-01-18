@@ -10,7 +10,7 @@ Usage: scripts/publish_docker.sh -r <repo> [-v <version>] [-p <platforms>] [--no
 Options:
   -r, --repo        Docker Hub repo, e.g. username/nginxpulse
   -v, --version     Version tag (defaults to git describe or timestamp)
-  -p, --platforms   Build platforms (default: linux/amd64)
+  -p, --platforms   Build platforms (default: linux/amd64,linux/arm64)
   --no-push         Build only (no push)
 
 Environment:
@@ -22,7 +22,7 @@ EOF
 
 REPO="${DOCKERHUB_REPO:-}"
 VERSION="${VERSION:-}"
-PLATFORMS="${PLATFORMS:-linux/amd64}"
+PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 TAG_LATEST=true
 PUSH=true
 
@@ -91,6 +91,10 @@ BUILD_ARGS=(
   --build-arg "GIT_COMMIT=$GIT_COMMIT"
   --build-arg "VERSION=$VERSION"
 )
+MULTI_PLATFORM=false
+if [[ "$PLATFORMS" == *","* ]]; then
+  MULTI_PLATFORM=true
+fi
 
 echo "Repo:     $REPO"
 echo "Version:  $VERSION"
@@ -122,9 +126,27 @@ if $PUSH; then
     done
   fi
 else
-  docker build \
-    "${TAGS[@]}" \
-    "${BUILD_ARGS[@]}" \
-    -f "$ROOT_DIR/Dockerfile" \
-    "$ROOT_DIR"
+  if docker buildx version >/dev/null 2>&1; then
+    if $MULTI_PLATFORM; then
+      echo "Multi-arch build without push is not supported. Use --push or set -p to a single platform." >&2
+      exit 1
+    fi
+    docker buildx build \
+      --platform "$PLATFORMS" \
+      --load \
+      "${TAGS[@]}" \
+      "${BUILD_ARGS[@]}" \
+      -f "$ROOT_DIR/Dockerfile" \
+      "$ROOT_DIR"
+  else
+    if [[ "$PLATFORMS" != "linux/amd64" ]]; then
+      echo "Docker buildx is required for non-default platform builds." >&2
+      exit 1
+    fi
+    docker build \
+      "${TAGS[@]}" \
+      "${BUILD_ARGS[@]}" \
+      -f "$ROOT_DIR/Dockerfile" \
+      "$ROOT_DIR"
+  fi
 fi

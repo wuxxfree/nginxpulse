@@ -2,8 +2,9 @@
 
 echo "开始构建 NginxPulse..."
 export CGO_ENABLED=0
-export GOOS=linux
-export GOARCH=amd64
+export GOOS="${GOOS:-$(go env GOOS)}"
+export GOARCH="${GOARCH:-$(go env GOARCH)}"
+echo "目标平台: ${GOOS}/${GOARCH}"
 
 if [ -f "webapp/package.json" ]; then
     echo "构建前端资源..."

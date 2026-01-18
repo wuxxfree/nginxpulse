@@ -146,3 +146,31 @@ jobs:
             release-dist/**/nginxpulse-*.zip
             release-dist/**/checksums-*.txt
             release-dist/dist-linux-amd64/configs/nginxpulse_config.json
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' && secrets.DOCKERHUB_REPO != '' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish multi-arch image
+        env:
+          DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/publish_docker.sh -r "$DOCKERHUB_REPO"

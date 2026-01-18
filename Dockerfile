@@ -19,7 +19,9 @@ ARG TARGETARCH
 ARG BUILD_TIME
 ARG GIT_COMMIT
 ARG VERSION
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-$(go env GOOS)} \
+    GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     go build -ldflags="-s -w -X 'github.com/likaia/nginxpulse/internal/version.Version=${VERSION}' -X 'github.com/likaia/nginxpulse/internal/version.BuildTime=${BUILD_TIME}' -X 'github.com/likaia/nginxpulse/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /out/nginxpulse ./cmd/nginxpulse/main.go
 

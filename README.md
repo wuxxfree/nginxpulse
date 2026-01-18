@@ -73,6 +73,25 @@ docker run -d --name nginxpulse \
   nginxpulse:local
 ```
 
+多架构镜像（amd64/arm64）构建与发布：
+
+```bash
+./scripts/publish_docker.sh -r <repo> -p linux/amd64,linux/arm64
+```
+
+仅本地构建指定架构示例：
+
+```bash
+docker buildx build --platform linux/arm64 -t nginxpulse:local --load .
+```
+
+GitHub Actions 自动发布（多架构镜像）：
+- 在仓库 Secrets 中配置：
+  - `DOCKERHUB_USERNAME`
+  - `DOCKERHUB_TOKEN`
+  - `DOCKERHUB_REPO`（例如：`username/nginxpulse`）
+- 推送 `v*` tag 或发布 Release 时触发。
+
 > 如果更偏好配置文件方式，可将 `configs/nginxpulse_config.json` 挂载到容器内的 `/app/configs/nginxpulse_config.json`。
 
 ### 2) Docker Compose
@@ -196,9 +215,18 @@ go build -o bin/nginxpulse ./cmd/nginxpulse/main.go
 ```bash
 ./scripts/build_single.sh
 ```
-执行后会生成 `bin/nginxpulse`，该二进制已内置前端静态资源，启动后即可同时提供前后端服务：
+执行后会生成单体可执行文件（已内置前端静态资源），启动后即可同时提供前后端服务：
 - 前端：`http://localhost:8088`
 - 后端：`http://localhost:8088/api/...`
+
+默认会构建 `linux/amd64` 和 `linux/arm64`，产物在：
+`bin/linux_amd64/nginxpulse` 与 `bin/linux_arm64/nginxpulse`。
+
+指定目标平台示例：
+```bash
+GOOS=linux GOARCH=amd64 ./scripts/build_single.sh
+GOOS=linux GOARCH=arm64 ./scripts/build_single.sh
+```
 
 #### 单体部署的配置方式
 单体运行时读取配置有两种方式（任选其一）：
@@ -235,7 +263,8 @@ VERSION=v0.4.8 make backend
 ```
 
 说明：
-- `make single` 产物在 `bin/nginxpulse`，配置在 `bin/configs/nginxpulse_config.json`（端口默认 `:8088`），gzip 示例在 `bin/var/log/gz-log-read-test/`。
+- `make single` 默认构建 `linux/amd64` 与 `linux/arm64`，产物在 `bin/linux_amd64/` 与 `bin/linux_arm64/`。
+- 单平台构建时，产物在 `bin/nginxpulse`，配置在 `bin/configs/nginxpulse_config.json`（端口默认 `:8088`），gzip 示例在 `bin/var/log/gz-log-read-test/`。
 
 ## 多个日志文件如何挂载？
 WEBSITES 它的值是个数组，参数对象中传入网站名、网址、日志路径（这个路径为容器内访问的路径，可按照需求随意指定）。
