@@ -86,7 +86,7 @@
           <a href="https://github.com/likaia/nginxpulse/" target="_blank" rel="noopener">https://github.com/likaia/nginxpulse/</a>
         </span>
       </div>
-      <RouterView :key="`${route.fullPath}-${currentLocale}`" />
+      <RouterView :key="`${route.fullPath}-${currentLocale}-${accessKeyReloadToken}`" />
     </main>
 
     <div v-if="accessKeyRequired" class="access-gate">
@@ -149,6 +149,7 @@ const accessKeySubmitting = ref(false);
 const accessKeyInput = ref(localStorage.getItem(ACCESS_KEY_STORAGE) || '');
 const accessKeyErrorKey = ref<string | null>(null);
 const accessKeyErrorText = ref('');
+const accessKeyReloadToken = ref(0);
 
 const languageOptions = computed(() => {
   const _locale = locale.value;
@@ -254,6 +255,9 @@ async function submitAccessKey() {
   localStorage.setItem(ACCESS_KEY_STORAGE, value);
   try {
     await refreshAppStatus();
+    if (!accessKeyRequired.value) {
+      accessKeyReloadToken.value += 1;
+    }
   } finally {
     accessKeySubmitting.value = false;
   }
