@@ -2,6 +2,10 @@
   <img src="docs/brand-mark.svg" alt="NginxPulse Logo" width="120" height="120">
 </p>
 
+<p align="center">
+  <a href="README_EN.md">English</a> | 简体中文
+</p>
+
 # NginxPulse
 
 轻量级 Nginx 访问日志分析与可视化面板，提供实时统计、PV 过滤、IP 归属地与客户端解析。
