@@ -10,6 +10,9 @@
 
 轻量级 Nginx 访问日志分析与可视化面板，提供实时统计、PV 过滤、IP 归属地与客户端解析。
 
+Wiki（详细文档与示例配置）：https://github.com/likaia/nginxpulse/wiki
+Wiki 同步脚本：`bash scripts/push_wiki.sh`
+
 ![demo-img-1.png](docs/demo-img-1.png)
 
 ![demo-img-2.png](docs/demo-img-2.png)
@@ -19,6 +22,7 @@
 - [如何使用项目](#如何使用项目)
   - [1) Docker](#1-docker)
   - [2) Docker Compose](#2-docker-compose)
+  - [时区设置（重要）](#时区设置重要)
   - [3) 手动构建（前端、后端）](#3-手动构建前端后端)
   - [4) 单体部署（单进程）](#4-单体部署单进程)
   - [5) Makefile 常用命令](#5-makefile-常用命令)
@@ -33,27 +37,60 @@
 - [目录结构与主要文件](#目录结构与主要文件)
 
 ## 项目开发技术栈
-- **后端**：`Go 1.23.x` · `Gin` · `Logrus`
-- **数据**：`SQLite (modernc.org/sqlite)`
+**重要提示（版本 > 1.5.3）**：已完全弃用 SQLite；单体部署必须自备 PostgreSQL 并配置 `DB_DSN`（或 `database.dsn`）。Docker 镜像内置 PostgreSQL。
+- **后端**：`Go 1.24.x` · `Gin` · `Logrus`
+- **数据**：`PostgreSQL (pgx)`
 - **IP 归属地**：`ip2region`（本地库） + `ip-api.com`（远程批量）
 - **前端**：`Vue 3` · `Vite` · `TypeScript` · `PrimeVue` · `ECharts/Chart.js` · `Scss`
 - **容器**：`Docker / Docker Compose` · `Nginx`（前端静态部署）
 
 ## IP 归属地查询策略
 1. **快速过滤**：空值/本地/回环地址返回“本地”，内网地址返回“内网/本地网络”。
-2. **缓存优先**：内存缓存命中直接返回（最多缓存 50,000 条）。
-3. **远程优先**：调用 `ip-api.com/batch` 批量查询，超时 1.2s，单批最多 100 个。
-4. **本地兜底**：远程失败或结果为“未知”时，IPv4 使用内置 ip2region 数据库本地查询（50ms 超时）。
-5. **IPv6 处理**：仅走远程查询，远程失败则返回“未知”。
+2. **解析解耦**：日志解析阶段仅入库并标记“待解析”，IP 归属地由后台任务异步补齐并回填。
+3. **缓存优先**：持久化缓存 + 内存缓存命中直接返回（默认上限 1,000,000 条）。
+4. **本地优先（IPv4/IPv6）**：优先查 ip2region，本地结果可用时直接使用。
+5. **远程补齐**：本地返回“未知”或解析失败时，调用远端 API（默认 `ip-api.com/batch`，可配置）批量查询（超时 1.2s，单批最多 100 个）。
+6. **远程失败**：返回“未知”。
 
-> 本地数据库 `ip2region.xdb` 内嵌在二进制中，首次启动会自动解压到 `./var/nginxpulse_data/ip2region.xdb`，并尝试加载向量索引提升查询性能。
+> 归属地解析未完成时，页面会显示“待解析”，地域统计可能不完整。
 
-> 本项目会访问外网 IP 归属地 API（`ip-api.com`），部署环境需放行该域名的出站访问。
+> 本地数据库 `ip2region_v4.xdb` 与 `ip2region_v6.xdb` 内嵌在二进制中，首次启动会自动解压到 `./var/nginxpulse_data/`，并尝试加载向量索引提升查询性能。
+
+> 本项目会访问外网 IP 归属地 API（默认 `ip-api.com`），部署环境需放行该域名的出站访问。
+
+## 自定义 IP 归属地 API
+可通过 `system.ipGeoApiUrl` 或环境变量 `IP_GEO_API_URL` 指向自定义服务。
+注意事项：编写 API 服务时，请务必严格按照本章节所述协议进行设计与返回，否则解析结果不可用。
+
+请求协议：
+- `POST` JSON，`Content-Type: application/json`
+- 请求体为数组，每个元素包含：
+  - `query`：IP 字符串
+  - `fields`：返回字段列表（可忽略）
+  - `lang`：语言（`zh-CN` / `en`，可忽略）
+
+响应协议：
+- 返回 JSON 数组（顺序与请求一致，或通过 `query` 回填）
+- 每个元素必须包含以下字段（字段含义如下）：
+  - `status`：`success` 表示成功，其他值视为失败
+  - `message`：失败原因（可为空）
+  - `query`：IP 字符串（用于匹配请求）
+  - `country`：国家名称（用于全球维度）
+  - `countryCode`：国家代码（如 `CN`、`US`）
+  - `region`：区域代码（可为空）
+  - `regionName`：省/州名称
+  - `city`：城市名称
+  - `isp`：运营商名称（可为空）
+
+当 `status != success` 或地址字段为空时，会回填为“未知”。
+
 
 ## 如何使用项目
 
 ### 1) Docker
 单镜像（前端 Nginx + 后端服务）：
+> 镜像内置 PostgreSQL，启动时会自动初始化数据库。
+> **必须挂载数据目录**：`/app/var/nginxpulse_data` 与 `/app/var/pgdata`。未挂载时容器会直接退出并报错。
 
 使用远程镜像（Docker Hub）：
 
@@ -63,7 +100,9 @@ docker run -d --name nginxpulse \
   -p 8089:8089 \
   -e WEBSITES='[{"name":"主站","logPath":"/share/log/nginx/access.log","domains":["kaisir.cn","www.kaisir.cn"]}]' \
   -v ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro \
+  -v /etc/localtime:/etc/localtime:ro \
   -v "$(pwd)/var/nginxpulse_data:/app/var/nginxpulse_data" \
+  -v "$(pwd)/var/pgdata:/app/var/pgdata" \
   magiccoders/nginxpulse:latest
 ```
 
@@ -76,7 +115,9 @@ docker run -d --name nginxpulse \
   -p 8089:8089 \
   -e WEBSITES='[{"name":"主站","logPath":"/share/log/nginx/access.log","domains":["kaisir.cn","www.kaisir.cn"]}]' \
   -v ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro \
+  -v /etc/localtime:/etc/localtime:ro \
   -v "$(pwd)/var/nginxpulse_data:/app/var/nginxpulse_data" \
+  -v "$(pwd)/var/pgdata:/app/var/pgdata" \
   nginxpulse:local
 ```
 
@@ -100,6 +141,7 @@ GitHub Actions 自动发布（多架构镜像）：
 - 推送 `v*` tag 或发布 Release 时触发。
 
 > 如果更偏好配置文件方式，可将 `configs/nginxpulse_config.json` 挂载到容器内的 `/app/configs/nginxpulse_config.json`。
+> 若未提供配置文件/环境变量，首次启动会进入“初始化配置向导”。保存后会写入 `configs/nginxpulse_config.json`，需重启容器生效（建议挂载 `/app/configs` 以持久化）。
 
 ### 2) Docker Compose
 使用远程镜像（Docker Hub）：将 `docker-compose.yml` 改为下方远程镜像版本，然后执行：
@@ -130,9 +172,22 @@ services:
     volumes:
       - ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro
       - ./var/nginxpulse_data:/app/var/nginxpulse_data
+      - ./var/pgdata:/app/var/pgdata
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
 ```
+
+### 时区设置（重要）
+本项目使用**系统时区**进行日志时间解析与统计，请确保运行环境时区正确。
+
+**Docker / Docker Compose**
+- 推荐挂载宿主机时区：`-v /etc/localtime:/etc/localtime:ro`（Linux）
+- 若宿主机提供 `/etc/timezone`，可额外挂载：`-v /etc/timezone:/etc/timezone:ro`
+- 若你只想指定时区，可设置 `TZ=Asia/Shanghai`，但需保证容器内有时区数据（例如安装 `tzdata` 或挂载 `/usr/share/zoneinfo`）
+
+**单体部署（单进程）**
+- 默认使用当前系统时区
+- 可通过环境变量临时指定：`TZ=Asia/Shanghai ./nginxpulse`
 
 示例 `docker-compose.yml`（本地构建）：
 
@@ -174,6 +229,10 @@ services:
   - 扫描间隔，支持 `5m`、`25s` 等 Go duration 格式。
 - `LOG_RETENTION_DAYS`（可选，默认：`30`）
   - 日志保留天数，超过天数会清理数据库中的旧日志。
+- `LOG_PARSE_BATCH_SIZE`（可选，默认：`100`）
+  - 日志解析入库批量大小，过大可能占用更多内存。
+- `IP_GEO_CACHE_LIMIT`（可选，默认：`1000000`）
+  - IP 归属地缓存上限条数，超过会清理最早记录。
 - `DEMO_MODE`（可选，默认：`false`）
   - 开启演示模式，定时生成模拟日志并直接写入数据库（不再解析日志文件）。
 - `ACCESS_KEYS`（可选，默认：空）
@@ -226,6 +285,9 @@ go build -o bin/nginxpulse ./cmd/nginxpulse/main.go
 > 本地开发前请准备好日志文件，放在 `var/log/` 下（或确保 `configs/nginxpulse_config.json` 的 `logPath` 指向对应文件）。
 
 ### 4) 单体部署（单进程）
+**重要提示（版本 > 1.5.3）**：已彻底弃用 SQLite。单体部署必须自备 PostgreSQL 并配置 `DB_DSN`（或在 `configs/nginxpulse_config.json` 填好 `database.dsn`）。  
+如果使用 Docker 镜像，则已内置 PostgreSQL，无需额外安装。
+
 如果你希望只分发一个可执行文件（内置前端静态资源），可以使用：
 ```bash
 ./scripts/build_single.sh
@@ -313,6 +375,11 @@ volumes:
 
 ## 远端日志支持（sources）
 当日志不方便挂载到本机/容器时，可以在网站配置中使用 `sources` 替代 `logPath`。一旦配置 `sources`，`logPath` 会被忽略。
+
+`sources` 接受 **JSON 数组**，每一项表示一个日志来源配置。这样设计是为了：
+1) 同一站点可接入多个来源（多台机器/多目录/多桶并行）。
+2) 不同来源可使用不同解析/鉴权/轮询策略，方便扩展与灰度切换。
+3) 支持轮转/归档场景下按来源拆分，后续新增来源无需改动旧配置。
 
 远端日志支持三种接入方式（按你现网条件选择）：
 1) **HTTP 服务暴露日志**（自己部署或用 Nginx/Apache）
@@ -657,37 +724,57 @@ PV_EXCLUDE_IPS='[]'
 ```
 重启后在“日志明细”页面点击“重新解析”按钮。
 
+3) 日志时间不正确  
+通常是运行环境时区未同步导致。请确认 Docker/系统时区正确，并按“时区设置（重要）”章节调整后重新解析日志。
+
 ## 二次开发注意事项
 
 ### 环境依赖
-- Go 1.23.x（与 `go.mod` 保持一致）
+- Go 1.24.x（与 `go.mod` 保持一致）
 - Node.js 20+ / npm
 - Docker（可选，用于容器化）
 
 ### 配置与数据目录
 - 配置文件：`configs/nginxpulse_config.json`
 - 数据目录：`var/nginxpulse_data/`（相对当前工作目录）
-  - `nginxpulse.db`：SQLite 数据库
   - `nginx_scan_state.json`：日志扫描游标
-  - `ip2region.xdb`：IP 本地库
-- 维表去重版本首次启动会自动迁移旧日志表结构（数据量大时需等待迁移完成），并在清理日志时自动回收维表孤儿数据。
+  - `ip2region_v4.xdb`：IPv4 本地库
+  - `ip2region_v6.xdb`：IPv6 本地库
+  - `nginxpulse.log`：应用运行日志（解析进度/告警等），不参与访问统计
+  - `nginxpulse_backup.log`：运行日志轮转文件（超过 5MB 自动轮转）
+- Docker 镜像内置 PostgreSQL，默认数据目录：`var/pgdata/`
+- 数据库由 PostgreSQL 提供，不存放在数据目录内。
+- 首次启动会自动创建数据库结构，并在清理日志时回收维表孤儿数据。
 - 数据库内包含维表与聚合表（`*_dim_*`、`*_agg_*`），用于去重和统计加速。
 - 环境变量覆盖：
   - `CONFIG_JSON` / `WEBSITES`
   - `LOG_DEST` / `TASK_INTERVAL` / `SERVER_PORT`
+  - `LOG_RETENTION_DAYS` / `LOG_PARSE_BATCH_SIZE` / `IP_GEO_CACHE_LIMIT`
+  - `IP_GEO_API_URL`
   - `PV_STATUS_CODES` / `PV_EXCLUDE_PATTERNS` / `PV_EXCLUDE_IPS`
+  - `DB_DRIVER` / `DB_DSN`
+  - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME`
+  - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`
+  - `POSTGRES_PORT` / `POSTGRES_LISTEN` / `POSTGRES_CONNECT_HOST` / `PGDATA`
 
 ### 大日志解析策略
 - 默认先解析最近 7 天的数据，保证前台查询能尽快返回。
 - 历史数据通过后台分批回填（按时间/字节预算），避免阻塞周期性扫描。
 - 当前台查询的时间范围仍在回填中时，会提示“所选范围仍在解析中，数据可能不完整”。
+
+### 大日志解析加速亮点（10G+）
+- **解析与归属地解耦**：日志解析阶段只做结构化入库 + “待解析”占位，不再同步做 IP 归属地查询，大幅减少耗时瓶颈。
+- **后台异步回填**：IP 归属地解析进入待处理队列，后台按批解析并回填 location，不阻塞主解析流程。
+- **批量入库可配置**：支持 `LOG_PARSE_BATCH_SIZE` 控制批量入库大小，兼顾吞吐与内存占用。
+- **冷热分层处理**：最近 7 天优先解析，历史数据回填按预算进行，避免单次扫描阻塞。
+- **缓存命中优先**：IP 归属地缓存命中直接复用，减少远程查询次数。
   
 ### Nginx 日志格式
 默认解析模式基于典型的 access log 格式：
 ```
 <ip> - <user> [time] "METHOD /path HTTP/1.x" status bytes "referer" "ua"
 ```
-如果你的 Nginx 使用自定义 `log_format`，需要同步调整 `internal/ingest/log_parser.go` 中的正则。
+如果你的 Nginx 使用自定义 `log_format`，请参考**自定义日志格式**章节
 
 #### 示例日志：
 ```bash
@@ -748,7 +835,7 @@ PV_EXCLUDE_IPS='[]'
 │   ├── server/
 │   │   └── http.go                 # HTTP 服务与中间件
 │   ├── store/
-│   │   └── repository.go           # SQLite 结构与写入
+│   │   └── repository.go           # PostgreSQL 结构与写入
 │   ├── version/
 │   │   └── info.go                 # 版本信息注入
 │   ├── webui/

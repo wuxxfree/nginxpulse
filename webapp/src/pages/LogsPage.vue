@@ -32,100 +32,233 @@
             outlined
             severity="danger"
             :label="reparseButtonLabel"
-            :disabled="!currentWebsiteId || reparseLoading || ipParsing"
+            :disabled="!currentWebsiteId || isParsingBusy"
             @click="openReparseDialog"
+          />
+          <Button
+            class="export-btn"
+            outlined
+            severity="secondary"
+            :label="exportButtonLabel"
+            :loading="exportLoading"
+            :disabled="!currentWebsiteId || exportLoading"
+            @click="handleExport"
           />
         </div>
         <div class="sort-controls">
-          <div class="filter-toggle-container">
-            <Checkbox v-model="excludeInternal" inputId="exclude-internal" binary />
-            <label for="exclude-internal">{{ t('logs.excludeInternal') }}</label>
+          <div class="filter-row filter-row-toggles">
+            <div class="filter-toggle-container">
+              <Checkbox v-model="excludeInternal" inputId="exclude-internal" binary />
+              <label for="exclude-internal">{{ t('logs.excludeInternal') }}</label>
+            </div>
+            <div class="filter-toggle-container">
+              <Checkbox v-model="pageviewOnly" inputId="pageview-only" binary />
+              <label for="pageview-only">{{ t('logs.excludeNoPv') }}</label>
+            </div>
+            <div class="filter-toggle-container">
+              <Checkbox v-model="excludeSpider" inputId="exclude-spider" binary />
+              <label for="exclude-spider">{{ t('logs.excludeSpider') }}</label>
+            </div>
+            <div class="filter-toggle-container">
+              <Checkbox v-model="excludeForeign" inputId="exclude-foreign" binary />
+              <label for="exclude-foreign">{{ t('logs.excludeForeign') }}</label>
+            </div>
           </div>
-          <div class="sort-field-container">
-            <label for="sort-field">{{ t('logs.sortField') }}</label>
-            <Dropdown
-              inputId="sort-field"
-              v-model="sortField"
-              class="sort-select"
-              :options="sortFieldOptions"
-              optionLabel="label"
-              optionValue="value"
-            />
-          </div>
-          <div class="sort-order-container">
-            <label for="sort-order">{{ t('logs.sortOrder') }}</label>
-            <Dropdown
-              inputId="sort-order"
-              v-model="sortOrder"
-              class="sort-select"
-              :options="sortOrderOptions"
-              optionLabel="label"
-              optionValue="value"
-            />
-          </div>
-          <div class="page-size-container">
-            <label for="page-size">{{ t('logs.pageSize') }}</label>
-            <Dropdown
-              inputId="page-size"
-              v-model="pageSize"
-              class="sort-select"
-              :options="pageSizeOptions"
-              optionLabel="label"
-              optionValue="value"
-            />
+          <div class="filter-row filter-row-fields">
+            <div class="status-code-container">
+              <label for="status-code">{{ t('logs.statusCode') }}</label>
+              <InputNumber
+                v-model="statusCodeFilter"
+                inputId="status-code"
+                class="status-code-input"
+                :placeholder="t('logs.statusCodePlaceholder')"
+                :useGrouping="false"
+                :min="100"
+                :max="599"
+                :minFractionDigits="0"
+                :maxFractionDigits="0"
+              />
+            </div>
+            <div class="sort-field-container">
+              <label for="sort-field">{{ t('logs.sortField') }}</label>
+              <Dropdown
+                inputId="sort-field"
+                v-model="sortField"
+                class="sort-select"
+                :options="sortFieldOptions"
+                optionLabel="label"
+                optionValue="value"
+              />
+            </div>
+            <div class="sort-order-container">
+              <label for="sort-order">{{ t('logs.sortOrder') }}</label>
+              <Dropdown
+                inputId="sort-order"
+                v-model="sortOrder"
+                class="sort-select"
+                :options="sortOrderOptions"
+                optionLabel="label"
+                optionValue="value"
+              />
+            </div>
+            <div class="page-size-container">
+              <label for="page-size">{{ t('logs.pageSize') }}</label>
+              <Dropdown
+                inputId="page-size"
+                v-model="pageSize"
+                class="sort-select"
+                :options="pageSizeOptions"
+                optionLabel="label"
+                optionValue="value"
+              />
+            </div>
           </div>
         </div>
       </div>
     </div>
-    <div v-if="ipParsing || parsingPending" class="logs-ip-notice">
+    <div v-if="ipParsing || parsingPending || ipGeoParsing || ipGeoPending" class="logs-ip-notice">
       <div v-if="ipParsing">{{ t('logs.ipParsing', { progress: ipParsingProgressLabel }) }}</div>
-      <div v-else>{{ t('logs.backfillParsing', { progress: parsingPendingProgressLabel }) }}</div>
+      <div v-else-if="parsingPending">{{ t('logs.backfillParsing', { progress: parsingPendingProgressLabel }) }}</div>
+      <div v-if="ipGeoParsing || ipGeoPending">{{ ipGeoParsingMessage }}</div>
     </div>
 
     <div class="card logs-table-box">
       <div class="logs-table-wrapper">
-        <table class="logs-table">
-          <thead>
-            <tr>
-              <th>{{ t('logs.time') }}</th>
-              <th>{{ t('common.ip') }}</th>
-              <th>{{ t('common.location') }}</th>
-              <th>{{ t('logs.request') }}</th>
-              <th>{{ t('common.status') }}</th>
-              <th>{{ t('common.traffic') }}</th>
-              <th>{{ t('logs.source') }}</th>
-              <th>{{ t('common.browser') }}</th>
-              <th>{{ t('common.os') }}</th>
-              <th>{{ t('common.device') }}</th>
-              <th>{{ t('common.pageview') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="loading">
-              <td colspan="11">{{ t('common.loading') }}</td>
-            </tr>
-            <tr v-else-if="logs.length === 0">
-              <td colspan="11">{{ t('logs.empty') }}</td>
-            </tr>
-            <tr v-else v-for="(log, index) in logs" :key="index">
-              <td :title="log.time">{{ log.time }}</td>
-              <td :title="log.ip">{{ log.ip }}</td>
-              <td :title="log.location">{{ log.location }}</td>
-              <td :title="log.request">{{ log.request }}</td>
-              <td :style="{ color: statusColor(log.statusCode) }">{{ log.statusCode }}</td>
-              <td :title="log.trafficTitle">{{ log.trafficText }}</td>
-              <td :title="log.referer">{{ log.referer }}</td>
-              <td :title="log.browser">{{ log.browser }}</td>
-              <td :title="log.os">{{ log.os }}</td>
-              <td :title="log.device">{{ log.device }}</td>
-              <td class="logs-pv-cell" :style="{ color: log.pageview ? 'var(--success-color)' : 'inherit' }">
-                {{ log.pageview ? '✓' : '-' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <DataTable
+          class="logs-table"
+          :value="logs"
+          :loading="loading"
+          :resizableColumns="true"
+          columnResizeMode="fit"
+          :rowHover="true"
+          :stripedRows="true"
+          :emptyMessage="t('logs.empty')"
+          :tableStyle="{ minWidth: '1200px' }"
+          @row-click="openLogDetail"
+        >
+          <template #loading>
+            <div class="logs-table-loading">{{ t('common.loading') }}</div>
+          </template>
+          <Column field="time" :header="t('logs.time')" :style="{ width: '180px' }">
+            <template #body="{ data }">
+              <span :title="data.time">{{ data.time }}</span>
+            </template>
+          </Column>
+          <Column field="ip" :header="t('common.ip')" :style="{ width: '140px' }">
+            <template #body="{ data }">
+              <span :title="data.ip">{{ data.ip }}</span>
+            </template>
+          </Column>
+          <Column field="location" :header="t('common.location')" :style="{ width: '160px' }">
+            <template #body="{ data }">
+              <span :title="data.location">{{ data.location }}</span>
+            </template>
+          </Column>
+          <Column field="request" :header="t('logs.request')" :style="{ width: '240px' }">
+            <template #body="{ data }">
+              <span :title="data.request">{{ data.request }}</span>
+            </template>
+          </Column>
+          <Column field="statusCode" :header="t('common.status')" :style="{ width: '110px' }">
+            <template #body="{ data }">
+              <span :style="{ color: statusColor(data.statusCode) }">{{ data.statusCode }}</span>
+            </template>
+          </Column>
+          <Column field="trafficText" :header="t('common.traffic')" :style="{ width: '130px' }">
+            <template #body="{ data }">
+              <span :title="data.trafficTitle">{{ data.trafficText }}</span>
+            </template>
+          </Column>
+          <Column field="referer" :header="t('logs.source')" :style="{ width: '220px' }">
+            <template #body="{ data }">
+              <span :title="data.referer">{{ data.referer }}</span>
+            </template>
+          </Column>
+          <Column field="browser" :header="t('common.browser')" :style="{ width: '160px' }">
+            <template #body="{ data }">
+              <span :title="data.browser">{{ data.browser }}</span>
+            </template>
+          </Column>
+          <Column field="os" :header="t('common.os')" :style="{ width: '150px' }">
+            <template #body="{ data }">
+              <span :title="data.os">{{ data.os }}</span>
+            </template>
+          </Column>
+          <Column field="device" :header="t('common.device')" :style="{ width: '140px' }">
+            <template #body="{ data }">
+              <span :title="data.device">{{ data.device }}</span>
+            </template>
+          </Column>
+          <Column field="pageview" :header="t('common.pageview')" :style="{ width: '90px' }" bodyClass="logs-pv-cell">
+            <template #body="{ data }">
+              <span :style="{ color: data.pageview ? 'var(--success-color)' : 'inherit' }">
+                {{ data.pageview ? '✓' : '-' }}
+              </span>
+            </template>
+          </Column>
+        </DataTable>
       </div>
     </div>
+
+    <Dialog
+      v-model:visible="logDetailVisible"
+      modal
+      class="log-detail-dialog"
+      :header="t('logs.detailTitle')"
+    >
+      <div class="log-detail-grid">
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('logs.time') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.time || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.ip') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.ip || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.location') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.location || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('logs.request') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.request || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.status') }}</span>
+          <span class="log-detail-value" :style="{ color: statusColor(selectedLog?.statusCode ?? '') }">
+            {{ selectedLog?.statusCode ?? t('common.none') }}
+          </span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.traffic') }}</span>
+          <span class="log-detail-value" :title="selectedLog?.trafficTitle">
+            {{ selectedLog?.trafficText || t('common.none') }}
+          </span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('logs.source') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.referer || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.browser') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.browser || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.os') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.os || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.device') }}</span>
+          <span class="log-detail-value">{{ selectedLog?.device || t('common.none') }}</span>
+        </div>
+        <div class="log-detail-item">
+          <span class="log-detail-label">{{ t('common.pageview') }}</span>
+          <span class="log-detail-value">
+            {{ selectedLog?.pageview ? '✓' : '-' }}
+          </span>
+        </div>
+      </div>
+    </Dialog>
 
     <div class="card pagination-box">
       <div class="pagination-controls">
@@ -157,6 +290,36 @@
         </Button>
       </div>
     </div>
+
+    <Dialog
+      v-model:visible="migrationDialogVisible"
+      modal
+      :closable="!migrationLoading"
+      :dismissableMask="!migrationLoading"
+      class="reparse-dialog migration-dialog"
+      :header="t('logs.migrationTitle')"
+    >
+      <div class="reparse-dialog-body">
+        <p>{{ t('logs.migrationBody') }}</p>
+        <p class="reparse-dialog-note">{{ t('logs.migrationNote') }}</p>
+        <p v-if="migrationError" class="reparse-dialog-error">{{ migrationError }}</p>
+      </div>
+      <template #footer>
+        <Button
+          text
+          severity="secondary"
+          :label="t('logs.migrationCancel')"
+          :disabled="migrationLoading"
+          @click="migrationDialogVisible = false"
+        />
+        <Button
+          severity="danger"
+          :label="migrationButtonLabel"
+          :loading="migrationLoading"
+          @click="confirmMigration"
+        />
+      </template>
+    </Dialog>
 
     <Dialog
       v-model:visible="reparseDialogVisible"
@@ -203,16 +366,38 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, ref, watch } from 'vue';
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import Dialog from 'primevue/dialog';
-import { fetchLogs, fetchWebsites, reparseLogs } from '@/api';
+import DataTable from 'primevue/datatable';
+import Column from 'primevue/column';
+import { exportLogs, fetchLogs, fetchWebsites, reparseAllLogs, reparseLogs } from '@/api';
 import type { WebsiteInfo } from '@/api/types';
 import { formatTraffic, getUserPreference, saveUserPreference } from '@/utils';
 import { formatBrowserLabel, formatDeviceLabel, formatLocationLabel, formatOSLabel, formatRefererLabel } from '@/i18n/mappings';
 import { normalizeLocale } from '@/i18n';
 import ThemeToggle from '@/components/ThemeToggle.vue';
 import WebsiteSelect from '@/components/WebsiteSelect.vue';
+
+type LogRow = {
+  time: string;
+  ip: string;
+  location: string;
+  request: string;
+  statusCode: number | string;
+  trafficText: string;
+  trafficTitle: string;
+  referer: string;
+  browser: string;
+  os: string;
+  device: string;
+  pageview: boolean;
+};
+
+type LogRowClickEvent = {
+  data: LogRow;
+  originalEvent?: MouseEvent;
+};
 
 const websites = ref<WebsiteInfo[]>([]);
 const websitesLoading = ref(true);
@@ -221,6 +406,10 @@ const currentWebsiteId = ref('');
 const searchInput = ref('');
 const searchFilter = ref('');
 const excludeInternal = ref(false);
+const pageviewOnly = ref(false);
+const excludeSpider = ref(false);
+const excludeForeign = ref(false);
+const statusCodeFilter = ref<number | null>(null);
 const sortField = ref(getUserPreference('logsSortField', 'timestamp'));
 const sortOrder = ref(getUserPreference('logsSortOrder', 'desc'));
 const pageSize = ref(Number(getUserPreference('logsPageSize', '100')));
@@ -231,7 +420,13 @@ const reparseDialogVisible = ref(false);
 const reparseLoading = ref(false);
 const reparseError = ref('');
 const reparseDialogMode = ref<'confirm' | 'blocked'>('confirm');
+const migrationDialogVisible = ref(false);
+const migrationLoading = ref(false);
+const migrationError = ref('');
+const exportLoading = ref(false);
 const demoMode = inject<{ value: boolean } | null>('demoMode', null);
+const migrationRequired = inject<{ value: boolean } | null>('migrationRequired', null);
+const migrationAckKey = 'pgMigrationAck';
 
 const { t, n, locale } = useI18n({ useScope: 'global' });
 const currentLocale = computed(() => normalizeLocale(locale.value));
@@ -253,12 +448,26 @@ const rawLogs = ref<Array<Record<string, any>>>([]);
 const loading = ref(false);
 const ipParsing = ref(false);
 const ipParsingProgress = ref<number | null>(null);
+const ipParsingEstimatedRemainingSeconds = ref<number | null>(null);
+const ipGeoParsing = ref(false);
+const ipGeoPending = ref(false);
+const ipGeoProgress = ref<number | null>(null);
+const ipGeoEstimatedRemainingSeconds = ref<number | null>(null);
 const parsingPending = ref(false);
 const parsingPendingProgress = ref<number | null>(null);
+const logDetailVisible = ref(false);
+const selectedLog = ref<LogRow | null>(null);
+const progressPollIntervalMs = 3000;
+let progressPollTimer: ReturnType<typeof setInterval> | null = null;
+let progressPollInFlight = false;
 
 const ipParsingProgressText = computed(() => {
   if (ipParsingProgress.value === null) {
     return '';
+  }
+  if (ipParsingEstimatedRemainingSeconds.value) {
+    const duration = formatDurationSeconds(ipParsingEstimatedRemainingSeconds.value);
+    return t('parsing.progressWithRemaining', { value: ipParsingProgress.value, duration });
   }
   return t('parsing.progress', { value: ipParsingProgress.value });
 });
@@ -269,6 +478,39 @@ const ipParsingProgressLabel = computed(() => {
   return currentLocale.value === 'zh-CN'
     ? `（${ipParsingProgressText.value}）`
     : ` (${ipParsingProgressText.value})`;
+});
+
+const ipGeoProgressText = computed(() => {
+  if (ipGeoProgress.value === null) {
+    return '';
+  }
+  return t('parsing.progress', { value: ipGeoProgress.value });
+});
+const ipGeoProgressLabel = computed(() => {
+  if (!ipGeoProgressText.value) {
+    return '';
+  }
+  return currentLocale.value === 'zh-CN'
+    ? `（${ipGeoProgressText.value}）`
+    : ` (${ipGeoProgressText.value})`;
+});
+const ipGeoRemainingLabel = computed(() => {
+  if (ipGeoEstimatedRemainingSeconds.value === null) {
+    return '';
+  }
+  return formatDurationSeconds(ipGeoEstimatedRemainingSeconds.value);
+});
+const ipGeoParsingMessage = computed(() => {
+  if (ipGeoProgressLabel.value && ipGeoRemainingLabel.value) {
+    return t('logs.ipGeoParsingProgress', {
+      progress: ipGeoProgressLabel.value,
+      remaining: ipGeoRemainingLabel.value,
+    });
+  }
+  if (ipGeoProgressLabel.value) {
+    return t('logs.ipGeoParsingProgressOnly', { progress: ipGeoProgressLabel.value });
+  }
+  return t('logs.ipGeoParsing');
 });
 
 const parsingPendingProgressText = computed(() => {
@@ -291,8 +533,15 @@ const currentWebsiteLabel = computed(() => {
   return match?.name || t('common.currentWebsite');
 });
 
+const isParsingBusy = computed(() => reparseLoading.value || migrationLoading.value || ipParsing.value);
 const reparseButtonLabel = computed(() =>
-  (reparseLoading.value || ipParsing.value) ? t('logs.reparseLoading') : t('logs.reparse')
+  isParsingBusy.value ? t('logs.reparseLoading') : t('logs.reparse')
+);
+const migrationButtonLabel = computed(() =>
+  migrationLoading.value ? t('logs.migrationLoading') : t('logs.migrationSubmit')
+);
+const exportButtonLabel = computed(() =>
+  exportLoading.value ? t('logs.exportLoading') : t('logs.export')
 );
 const isDemoMode = computed(() => demoMode?.value ?? false);
 const reparseDialogTitle = computed(() =>
@@ -306,6 +555,146 @@ function normalizeProgress(value: unknown): number | null {
   return Math.min(100, Math.max(0, Math.round(value)));
 }
 
+function normalizeSeconds(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.round(value);
+  if (normalized <= 0) {
+    return null;
+  }
+  return normalized;
+}
+
+function formatDurationSeconds(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return t('overview.durationHoursMinutes', { hours, minutes });
+  }
+  if (minutes > 0) {
+    return t('overview.durationMinutesSeconds', { minutes, seconds: secs });
+  }
+  return t('overview.durationSeconds', { seconds: secs });
+}
+
+function resolveStatusCodeParam() {
+  if (statusCodeFilter.value === null || statusCodeFilter.value === undefined) {
+    return undefined;
+  }
+  const value = Math.trunc(statusCodeFilter.value);
+  if (!Number.isFinite(value) || value < 100 || value > 599) {
+    return undefined;
+  }
+  return String(value);
+}
+
+function buildExportParams() {
+  const statusCode = resolveStatusCodeParam();
+  const params: Record<string, unknown> = {
+    id: currentWebsiteId.value,
+    page: currentPage.value,
+    pageSize: pageSize.value,
+    sortField: sortField.value,
+    sortOrder: sortOrder.value,
+    lang: currentLocale.value,
+  };
+  if (searchFilter.value) {
+    params.filter = searchFilter.value;
+  }
+  if (statusCode) {
+    params.statusCode = statusCode;
+  }
+  if (excludeInternal.value) {
+    params.excludeInternal = true;
+  }
+  if (pageviewOnly.value) {
+    params.pageviewOnly = true;
+  }
+  if (excludeSpider.value) {
+    params.excludeSpider = true;
+  }
+  if (excludeForeign.value) {
+    params.excludeForeign = true;
+  }
+  return params;
+}
+
+function extractExportFileName(disposition?: string) {
+  if (!disposition) {
+    return '';
+  }
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const quotedMatch = disposition.match(/filename=\"([^\"]+)\"/i);
+  if (quotedMatch?.[1]) {
+    return quotedMatch[1];
+  }
+  const fallbackMatch = disposition.match(/filename=([^;]+)/i);
+  return fallbackMatch?.[1]?.trim() || '';
+}
+
+function formatExportTimestamp() {
+  const now = new Date();
+  const pad = (value: number) => `${value}`.padStart(2, '0');
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(
+    now.getHours()
+  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+async function handleExport() {
+  if (!currentWebsiteId.value || exportLoading.value) {
+    return;
+  }
+  exportLoading.value = true;
+  try {
+    const response = await exportLogs(buildExportParams());
+    const headerName = extractExportFileName(response.headers?.['content-disposition']);
+    const fallbackName = `nginxpulse_logs_${formatExportTimestamp()}.csv`;
+    const fileName = headerName || fallbackName;
+    const url = window.URL.createObjectURL(response.data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('导出日志失败:', error);
+  } finally {
+    exportLoading.value = false;
+  }
+}
+
+function applyParsingStatus(result: Record<string, any>) {
+  ipParsing.value = Boolean(result.ip_parsing);
+  ipParsingProgress.value = ipParsing.value ? normalizeProgress(result.ip_parsing_progress) : null;
+  ipParsingEstimatedRemainingSeconds.value = ipParsing.value
+    ? normalizeSeconds(result.ip_parsing_estimated_remaining_seconds)
+    : null;
+  ipGeoParsing.value = Boolean(result.ip_geo_parsing);
+  ipGeoPending.value = Boolean(result.ip_geo_pending);
+  ipGeoProgress.value = ipGeoParsing.value || ipGeoPending.value
+    ? normalizeProgress(result.ip_geo_progress)
+    : null;
+  ipGeoEstimatedRemainingSeconds.value = ipGeoParsing.value || ipGeoPending.value
+    ? normalizeSeconds(result.ip_geo_estimated_remaining_seconds)
+    : null;
+  parsingPending.value = Boolean(result.parsing_pending);
+  parsingPendingProgress.value = parsingPending.value
+    ? normalizeProgress(result.parsing_pending_progress)
+    : null;
+}
+
 function statusColor(statusCode: number | string) {
   if (typeof statusCode !== 'number') {
     return 'inherit';
@@ -317,6 +706,15 @@ function statusColor(statusCode: number | string) {
     return 'var(--warning-color)';
   }
   return 'var(--success-color)';
+}
+
+function openLogDetail(event: LogRowClickEvent) {
+  const target = event?.originalEvent?.target;
+  if (target instanceof HTMLElement && target.closest('.p-column-resizer')) {
+    return;
+  }
+  selectedLog.value = event.data;
+  logDetailVisible.value = true;
 }
 
 const logs = computed(() => {
@@ -362,6 +760,10 @@ onMounted(() => {
   loadWebsites();
 });
 
+onUnmounted(() => {
+  stopProgressPolling();
+});
+
 watch(currentWebsiteId, (value) => {
   if (value) {
     saveUserPreference('selectedWebsite', value);
@@ -370,17 +772,41 @@ watch(currentWebsiteId, (value) => {
   loadLogs();
 });
 
-watch([sortField, sortOrder, pageSize, excludeInternal], () => {
+watch([ipParsing, parsingPending, ipGeoParsing, ipGeoPending, currentWebsiteId], ([ipActive, pendingActive, geoActive, geoPendingActive, websiteId], prev) => {
+  if (!websiteId) {
+    stopProgressPolling();
+    return;
+  }
+  const wasActive = Array.isArray(prev) && Boolean(prev[0] || prev[1] || prev[2] || prev[3]);
+  const isActive = Boolean(ipActive || pendingActive || geoActive || geoPendingActive);
+  if (ipActive || pendingActive || geoActive || geoPendingActive) {
+    startProgressPolling();
+    refreshParsingStatus();
+  } else {
+    stopProgressPolling(wasActive);
+  }
+});
+
+watch([sortField, sortOrder, pageSize, excludeInternal, pageviewOnly, excludeSpider, excludeForeign, statusCodeFilter], () => {
   saveUserPreference('logsSortField', sortField.value);
   saveUserPreference('logsSortOrder', sortOrder.value);
   saveUserPreference('logsPageSize', String(pageSize.value));
   saveUserPreference('logsExcludeInternal', excludeInternal.value ? 'true' : 'false');
+  saveUserPreference('logsPageviewOnly', pageviewOnly.value ? 'true' : 'false');
+  saveUserPreference('logsExcludeSpider', excludeSpider.value ? 'true' : 'false');
+  saveUserPreference('logsExcludeForeign', excludeForeign.value ? 'true' : 'false');
+  saveUserPreference('logsStatusCode', statusCodeFilter.value ? String(statusCodeFilter.value) : '');
   currentPage.value = 1;
   loadLogs();
 });
 
 function initPreferences() {
   excludeInternal.value = getUserPreference('logsExcludeInternal', 'false') === 'true';
+  pageviewOnly.value = getUserPreference('logsPageviewOnly', 'false') === 'true';
+  excludeSpider.value = getUserPreference('logsExcludeSpider', 'false') === 'true';
+  excludeForeign.value = getUserPreference('logsExcludeForeign', 'false') === 'true';
+  const savedStatusCode = Number(getUserPreference('logsStatusCode', ''));
+  statusCodeFilter.value = Number.isFinite(savedStatusCode) && savedStatusCode > 0 ? savedStatusCode : null;
 }
 
 async function loadWebsites() {
@@ -396,6 +822,7 @@ async function loadWebsites() {
     } else {
       currentWebsiteId.value = '';
     }
+    maybeShowMigrationDialog();
   } catch (error) {
     console.error('初始化网站失败:', error);
     websites.value = [];
@@ -411,6 +838,7 @@ async function loadLogs() {
   }
   loading.value = true;
   try {
+    const statusCodeParam = resolveStatusCodeParam();
     const result = await fetchLogs(
       currentWebsiteId.value,
       currentPage.value,
@@ -420,17 +848,22 @@ async function loadLogs() {
       searchFilter.value,
       undefined,
       undefined,
+      statusCodeParam,
+      excludeInternal.value,
       undefined,
-      excludeInternal.value
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      pageviewOnly.value,
+      undefined,
+      undefined,
+      excludeSpider.value,
+      excludeForeign.value
     );
     rawLogs.value = result.logs || [];
     totalPages.value = result.pagination?.pages || 0;
-    ipParsing.value = Boolean(result.ip_parsing);
-    ipParsingProgress.value = ipParsing.value ? normalizeProgress(result.ip_parsing_progress) : null;
-    parsingPending.value = Boolean(result.parsing_pending);
-    parsingPendingProgress.value = parsingPending.value
-      ? normalizeProgress(result.parsing_pending_progress)
-      : null;
+    applyParsingStatus(result);
   } catch (error) {
     console.error('加载日志失败:', error);
     rawLogs.value = [];
@@ -441,6 +874,64 @@ async function loadLogs() {
     parsingPendingProgress.value = null;
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshParsingStatus() {
+  if (!currentWebsiteId.value || progressPollInFlight || loading.value) {
+    return;
+  }
+  progressPollInFlight = true;
+  try {
+    const statusCodeParam = resolveStatusCodeParam();
+    const result = await fetchLogs(
+      currentWebsiteId.value,
+      currentPage.value,
+      pageSize.value,
+      sortField.value,
+      sortOrder.value,
+      searchFilter.value,
+      undefined,
+      undefined,
+      statusCodeParam,
+      excludeInternal.value,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      pageviewOnly.value,
+      undefined,
+      undefined,
+      excludeSpider.value,
+      excludeForeign.value
+    );
+    applyParsingStatus(result);
+  } catch (error) {
+    console.debug('刷新解析进度失败:', error);
+  } finally {
+    progressPollInFlight = false;
+  }
+}
+
+function startProgressPolling() {
+  if (progressPollTimer) {
+    return;
+  }
+  progressPollTimer = setInterval(() => {
+    if (ipParsing.value || parsingPending.value || ipGeoParsing.value || ipGeoPending.value) {
+      refreshParsingStatus();
+    }
+  }, progressPollIntervalMs);
+}
+
+function stopProgressPolling(refresh = false) {
+  if (progressPollTimer) {
+    clearInterval(progressPollTimer);
+    progressPollTimer = null;
+  }
+  if (refresh) {
+    loadLogs();
   }
 }
 
@@ -459,6 +950,50 @@ function openReparseDialog() {
   }
   reparseDialogMode.value = 'confirm';
   reparseDialogVisible.value = true;
+}
+
+function maybeShowMigrationDialog() {
+  const acknowledged = getUserPreference(migrationAckKey, 'false') === 'true';
+  if (
+    acknowledged ||
+    isDemoMode.value ||
+    websites.value.length === 0 ||
+    !migrationRequired?.value
+  ) {
+    return;
+  }
+  migrationError.value = '';
+  migrationDialogVisible.value = true;
+}
+
+async function confirmMigration() {
+  if (migrationLoading.value) {
+    return;
+  }
+  if (websites.value.length === 0) {
+    migrationError.value = t('logs.migrationError');
+    return;
+  }
+  migrationLoading.value = true;
+  migrationError.value = '';
+  try {
+    await reparseAllLogs();
+    saveUserPreference(migrationAckKey, 'true');
+    if (migrationRequired) {
+      migrationRequired.value = false;
+    }
+    migrationDialogVisible.value = false;
+    currentPage.value = 1;
+    await loadLogs();
+  } catch (error) {
+    if (error instanceof Error) {
+      migrationError.value = error.message;
+    } else {
+      migrationError.value = t('logs.migrationError');
+    }
+  } finally {
+    migrationLoading.value = false;
+  }
 }
 
 async function confirmReparse() {
@@ -527,6 +1062,12 @@ function nextPage() {
   z-index: 30;
 }
 
+.logs-layout .card:hover {
+  transform: none;
+  box-shadow: var(--shadow);
+  border-color: var(--border);
+}
+
 .logs-ip-notice {
   padding: 10px 14px;
   margin-bottom: 18px;
@@ -540,21 +1081,24 @@ function nextPage() {
 .logs-control-content {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
 }
 
 .search-box {
   display: flex;
+  align-items: center;
   gap: 10px;
-  flex: 0 1 360px;
-  min-width: 240px;
+  flex: 1 1 420px;
+  min-width: 320px;
+  flex-wrap: wrap;
 }
 
 .search-input {
-  flex: 1 1 auto;
-  max-width: 320px;
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: none;
 }
 
 .search-btn {
@@ -566,9 +1110,23 @@ function nextPage() {
 
 .sort-controls {
   display: flex;
-  gap: 20px;
+  gap: 12px;
+  align-items: stretch;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  flex: 1 1 520px;
+  min-width: 320px;
+}
+
+.filter-row {
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
+  gap: 12px;
+}
+
+.filter-row-fields {
+  gap: 16px;
 }
 
 .filter-toggle-container {
@@ -582,6 +1140,24 @@ function nextPage() {
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.status-code-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.status-code-input {
+  width: 110px;
+}
+
+.status-code-input :deep(.p-inputtext) {
+  font-size: 12px;
 }
 
 .sort-field-container,
@@ -590,10 +1166,12 @@ function nextPage() {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .sort-select {
-  min-width: 110px;
+  min-width: 120px;
 }
 
 .sort-select :deep(.p-dropdown) {
@@ -628,14 +1206,19 @@ function nextPage() {
 }
 
 .logs-table {
+  background: transparent;
+  border: none;
+}
+
+.logs-table :deep(.p-datatable-table) {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
   table-layout: fixed;
 }
 
-.logs-table th,
-.logs-table td {
+.logs-table :deep(.p-datatable-thead > tr > th),
+.logs-table :deep(.p-datatable-tbody > tr > td) {
   padding: 8px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border);
@@ -644,68 +1227,75 @@ function nextPage() {
   text-overflow: ellipsis;
 }
 
-.logs-table th {
+.logs-table :deep(.p-datatable-thead > tr > th) {
   position: sticky;
   top: 0;
   background-color: var(--panel);
-  z-index: 1;
+  z-index: 2;
   font-weight: 600;
 }
 
-.logs-table tbody tr:nth-child(even) {
+.logs-table :deep(.p-datatable-tbody > tr.p-row-odd) {
   background-color: var(--row-alt-bg);
 }
 
-.logs-table tbody tr:hover {
+.logs-table :deep(.p-datatable-tbody > tr) {
+  cursor: pointer;
+}
+
+.logs-table :deep(.p-datatable-tbody > tr:hover) {
   background-color: rgba(var(--primary-color-rgb), 0.08);
 }
 
-.logs-table th:nth-child(1) {
-  width: 12%;
+.logs-table :deep(.p-column-resizer) {
+  cursor: col-resize;
+  width: 6px;
 }
 
-.logs-table th:nth-child(2) {
-  width: 8%;
+.logs-table :deep(.p-column-resizer:hover) {
+  background-color: rgba(var(--primary-color-rgb), 0.2);
 }
 
-.logs-table th:nth-child(3) {
-  width: 5%;
-}
-
-.logs-table th:nth-child(4) {
-  width: 12%;
-}
-
-.logs-table th:nth-child(5) {
-  width: 5%;
-}
-
-.logs-table th:nth-child(6) {
-  width: 7%;
-}
-
-.logs-table th:nth-child(7) {
-  width: 12%;
-}
-
-.logs-table th:nth-child(8) {
-  width: 8%;
-}
-
-.logs-table th:nth-child(9) {
-  width: 7%;
-}
-
-.logs-table th:nth-child(10) {
-  width: 5%;
-}
-
-.logs-table th:nth-child(11) {
-  width: 4%;
+.logs-table-loading {
+  padding: 14px 16px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .logs-pv-cell {
   text-align: center;
+}
+
+.log-detail-dialog :deep(.p-dialog-content) {
+  padding-top: 8px;
+}
+
+.log-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.log-detail-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-detail-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.log-detail-value {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
 }
 
 .pagination-box {
@@ -752,6 +1342,13 @@ function nextPage() {
   padding: 0 18px;
 }
 
+.export-btn {
+  border-radius: 12px;
+  font-weight: 600;
+  min-width: 120px;
+  padding: 0 16px;
+}
+
 .reparse-dialog :deep(.p-dialog-content) {
   padding-top: 8px;
 }
@@ -789,9 +1386,17 @@ function nextPage() {
     gap: 12px;
   }
 
+  .filter-row {
+    gap: 10px;
+  }
+
   .pagination-controls {
     flex-direction: column;
     gap: 12px;
+  }
+
+  .log-detail-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

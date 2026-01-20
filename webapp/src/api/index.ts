@@ -1,7 +1,12 @@
+import type { AxiosResponse } from 'axios';
 import client from './client';
 import type {
   AppStatusResponse,
   ApiResponse,
+  ConfigPayload,
+  ConfigResponse,
+  ConfigSaveResponse,
+  ConfigValidationResult,
   RealtimeStats,
   SimpleSeriesStats,
   TimeSeriesStats,
@@ -32,9 +37,40 @@ export const fetchAppStatus = async (): Promise<AppStatusResponse> => {
   return response.data;
 };
 
+export const fetchConfig = async (): Promise<ConfigResponse> => {
+  const response = await client.get<ApiResponse<ConfigResponse>>('/api/config');
+  return response.data;
+};
+
+export const validateConfig = async (config: ConfigPayload): Promise<ConfigValidationResult> => {
+  const response = await client.post<ApiResponse<ConfigValidationResult>>('/api/config/validate', {
+    config,
+  });
+  return response.data;
+};
+
+export const saveConfig = async (config: ConfigPayload): Promise<ConfigSaveResponse> => {
+  const response = await client.post<ApiResponse<ConfigSaveResponse>>('/api/config/save', {
+    config,
+  });
+  return response.data;
+};
+
+export const restartSystem = async (): Promise<{ success: boolean }> => {
+  const response = await client.post<ApiResponse<{ success: boolean }>>('/api/system/restart');
+  return response.data;
+};
+
 export const reparseLogs = async (websiteId: string): Promise<void> => {
   await client.post<ApiResponse<{ success: boolean }>>('/api/logs/reparse', {
     id: websiteId,
+  });
+};
+
+export const reparseAllLogs = async (): Promise<void> => {
+  await client.post<ApiResponse<{ success: boolean }>>('/api/logs/reparse', {
+    id: '',
+    migration: true,
   });
 };
 
@@ -123,7 +159,9 @@ export const fetchLogs = (
   urlFilter?: string,
   pageviewOnly?: boolean,
   newVisitor?: string,
-  distinctIp?: boolean
+  distinctIp?: boolean,
+  excludeSpider?: boolean,
+  excludeForeign?: boolean
 ): Promise<Record<string, any>> => {
   const params: Record<string, unknown> = {
     id: websiteId,
@@ -172,9 +210,23 @@ export const fetchLogs = (
   if (distinctIp) {
     params.distinctIp = true;
   }
+  if (excludeSpider) {
+    params.excludeSpider = true;
+  }
+  if (excludeForeign) {
+    params.excludeForeign = true;
+  }
 
   return fetchStats('logs', params);
 };
+
+export const exportLogs = async (
+  params: Record<string, unknown> = {}
+): Promise<AxiosResponse<Blob>> =>
+  client.get('/api/logs/export', {
+    params: buildParams(params),
+    responseType: 'blob',
+  });
 
 export const fetchSessions = (
   websiteId: string,

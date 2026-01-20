@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 )
@@ -91,10 +92,10 @@ func (s *TimeSeriesStatsManager) statsByHourlyBuckets(
 		bucketIndex[bucket] = i
 	}
 
-	rows, err := s.repo.GetDB().Query(fmt.Sprintf(
+	rows, err := s.repo.GetDB().Query(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT bucket, pv FROM "%s_agg_hourly" WHERE bucket >= ? AND bucket <= ?`,
 		websiteID,
-	), startBucket, endBucket)
+	)), startBucket, endBucket)
 	if err != nil {
 		return results, err
 	}
@@ -113,10 +114,10 @@ func (s *TimeSeriesStatsManager) statsByHourlyBuckets(
 		return results, err
 	}
 
-	uvRows, err := s.repo.GetDB().Query(fmt.Sprintf(
+	uvRows, err := s.repo.GetDB().Query(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT bucket, COUNT(*) FROM "%s_agg_hourly_ip" WHERE bucket >= ? AND bucket <= ? GROUP BY bucket`,
 		websiteID,
-	), startBucket, endBucket)
+	)), startBucket, endBucket)
 	if err != nil {
 		return results, err
 	}
@@ -150,21 +151,22 @@ func (s *TimeSeriesStatsManager) statsByDailyBuckets(
 		dayIndex[day] = i
 	}
 
-	rows, err := s.repo.GetDB().Query(fmt.Sprintf(
+	rows, err := s.repo.GetDB().Query(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT day, pv FROM "%s_agg_daily" WHERE day >= ? AND day <= ?`,
 		websiteID,
-	), startDay, endDay)
+	)), startDay, endDay)
 	if err != nil {
 		return results, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var day string
+		var day time.Time
 		var pv int
 		if err := rows.Scan(&day, &pv); err != nil {
 			return results, err
 		}
-		if idx, ok := dayIndex[day]; ok {
+		dayKey := day.Format("2006-01-02")
+		if idx, ok := dayIndex[dayKey]; ok {
 			results[idx].PV = pv
 		}
 	}
@@ -172,21 +174,22 @@ func (s *TimeSeriesStatsManager) statsByDailyBuckets(
 		return results, err
 	}
 
-	uvRows, err := s.repo.GetDB().Query(fmt.Sprintf(
+	uvRows, err := s.repo.GetDB().Query(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT day, COUNT(*) FROM "%s_agg_daily_ip" WHERE day >= ? AND day <= ? GROUP BY day`,
 		websiteID,
-	), startDay, endDay)
+	)), startDay, endDay)
 	if err != nil {
 		return results, err
 	}
 	defer uvRows.Close()
 	for uvRows.Next() {
-		var day string
+		var day time.Time
 		var uv int
 		if err := uvRows.Scan(&day, &uv); err != nil {
 			return results, err
 		}
-		if idx, ok := dayIndex[day]; ok {
+		dayKey := day.Format("2006-01-02")
+		if idx, ok := dayIndex[dayKey]; ok {
 			results[idx].UV = uv
 		}
 	}

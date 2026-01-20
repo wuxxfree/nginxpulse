@@ -149,12 +149,12 @@ func (p *LogParser) backfillPlainFile(
 	}
 	window := parseWindow{maxTs: cutoffTs}
 
-	batch := make([]store.NginxLogRecord, 0, backfillBatchSize)
+	batch := make([]store.NginxLogRecord, 0, p.parseBatchSize)
 	processBatch := func() {
 		if len(batch) == 0 {
 			return
 		}
-		p.fillBatchLocations(batch)
+		p.queueBatchIPGeo(batch)
 		if err := p.repo.BatchInsertLogsForWebsite(websiteID, batch); err != nil {
 			logrus.Errorf("批量插入网站 %s 的日志记录失败: %v", websiteID, err)
 		}
@@ -216,7 +216,7 @@ func (p *LogParser) backfillPlainFile(
 		}
 		entryCount++
 
-		if len(batch) >= backfillBatchSize {
+		if len(batch) >= p.parseBatchSize {
 			processBatch()
 		}
 

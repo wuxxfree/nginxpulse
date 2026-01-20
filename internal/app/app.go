@@ -38,6 +38,22 @@ func Run() error {
 	logrus.Infof("版本: %s, 构建时间: %s, Git提交: %s", version.Version, version.BuildTime, version.GitCommit)
 	defer logrus.Info("------ 服务已安全关闭 ------")
 
+	cfg := config.ReadConfig()
+	setupMode := config.NeedsSetup()
+	config.SetSetupMode(setupMode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if setupMode {
+		serverHandle, err := server.StartHTTPServer(nil, nil, cfg.Server.Port)
+		if err != nil {
+			return err
+		}
+		printStartupNotice(cfg)
+		return waitForShutdown(cancel, serverHandle)
+	}
+
 	if err := enrich.InitIPGeoLocation(); err != nil {
 		return err
 	}
@@ -51,15 +67,14 @@ func Run() error {
 	logParser := ingest.NewLogParser(repository)
 	statsFactory := analytics.NewStatsFactory(repository)
 
-	cfg := config.ReadConfig()
-	serverHandle := server.StartHTTPServer(statsFactory, logParser, cfg.Server.Port)
+	serverHandle, err := server.StartHTTPServer(statsFactory, logParser, cfg.Server.Port)
+	if err != nil {
+		return err
+	}
 	printStartupNotice(cfg)
 
 	interval := config.ParseInterval(cfg.System.TaskInterval, 5*time.Minute)
 	go worker.InitialScan(logParser, interval)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	if cfg.System.DemoMode {
 		go worker.RunDemoGenerator(ctx, repository, time.Minute)
@@ -151,7 +166,7 @@ func initRepository() (*store.Repository, error) {
 	logrus.Info("****** 1 初始化数据 ******")
 	repository, err := store.NewRepository()
 	if err != nil {
-		logrus.WithField("error", err).Error("Failed to create database file")
+		logrus.WithField("error", err).Error("Failed to connect database")
 		return repository, err
 	}
 

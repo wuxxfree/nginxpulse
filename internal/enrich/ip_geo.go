@@ -20,17 +20,19 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:embed data/ip2region.xdb
+//go:embed data/ip2region_v4.xdb data/ip2region_v6.xdb
 var ipDataFiles embed.FS
 
 var (
-	ipSearcher  *xdb.Searcher
-	vectorIndex []byte
-	dbPath      = filepath.Join(config.DataDir, "ip2region.xdb")
+	ipSearcherV4  *xdb.Searcher
+	ipSearcherV6  *xdb.Searcher
+	vectorIndexV4 []byte
+	vectorIndexV6 []byte
+	dbPathV4      = filepath.Join(config.DataDir, "ip2region_v4.xdb")
+	dbPathV6      = filepath.Join(config.DataDir, "ip2region_v6.xdb")
 )
 
 const (
-	ipAPIBatchURL  = "http://ip-api.com/batch"
 	ipAPIFields    = "status,message,country,countryCode,region,regionName,city,isp,query"
 	ipAPITimeout   = 1200 * time.Millisecond
 	maxIPCacheSize = 50000
@@ -40,6 +42,7 @@ const (
 type IPLocation struct {
 	Domestic string
 	Global   string
+	Source   string
 }
 
 type ipLocationCacheEntry struct {
@@ -71,67 +74,104 @@ type ipAPIBatchResponse struct {
 	Query       string `json:"query"`
 }
 
-// ExtractIPRegionDB 从嵌入的文件系统中提取 IP2Region 数据库
-func ExtractIPRegionDB() (string, error) {
+// ExtractIPRegionDBs 从嵌入的文件系统中提取 IP2Region 数据库
+func ExtractIPRegionDBs() (string, string, error) {
 	// 确保数据目录存在
 	if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(config.DataDir, 0755); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 
 	// 目标文件路径
-	dbPath := filepath.Join(config.DataDir, "ip2region.xdb")
+	v4Path := filepath.Join(config.DataDir, "ip2region_v4.xdb")
+	v6Path := filepath.Join(config.DataDir, "ip2region_v6.xdb")
 
+	if err := extractIPRegionDBFile("data/ip2region_v4.xdb", v4Path, "IP2Region v4"); err != nil {
+		return "", "", err
+	}
+
+	if err := extractIPRegionDBFile("data/ip2region_v6.xdb", v6Path, "IP2Region v6"); err != nil {
+		return "", "", err
+	}
+
+	return v4Path, v6Path, nil
+}
+
+func extractIPRegionDBFile(embedPath, targetPath, label string) error {
 	// 检查文件是否已存在
-	if _, err := os.Stat(dbPath); err == nil {
-		logrus.Info("IP2Region 数据库已存在，跳过提取")
-		return dbPath, nil
+	if _, err := os.Stat(targetPath); err == nil {
+		logrus.Infof("%s 数据库已存在，跳过提取", label)
+		return nil
 	}
 
 	// 从嵌入文件系统读取数据
-	data, err := fs.ReadFile(ipDataFiles, "data/ip2region.xdb")
+	data, err := fs.ReadFile(ipDataFiles, embedPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	// 写入文件
-	if err := os.WriteFile(dbPath, data, 0644); err != nil {
-		return "", err
+	if err := os.WriteFile(targetPath, data, 0644); err != nil {
+		return err
 	}
 
-	logrus.Info("IP2Region 数据库已成功提取")
-	return dbPath, nil
+	logrus.Infof("%s 数据库已成功提取", label)
+	return nil
 }
 
 // InitIPGeoLocation 初始化 IP 地理位置查询
 func InitIPGeoLocation() error {
 	// 从嵌入的文件系统中提取数据库文件
-	extractedPath, err := ExtractIPRegionDB()
+	v4Path, v6Path, err := ExtractIPRegionDBs()
 	if err != nil {
 		return fmt.Errorf("提取 ip2region 数据库失败: %v", err)
 	}
 
 	// 更新数据库路径
-	dbPath = extractedPath
+	dbPathV4 = v4Path
+	dbPathV6 = v6Path
 
-	// 加载矢量索引以加速搜索
-	vIndex, err := xdb.LoadVectorIndexFromFile(dbPath)
+	searcherV4, vIndexV4, err := initIPSearcher(dbPathV4, "v4")
 	if err != nil {
-		logrus.Warnf("加载 ip2region 矢量索引失败，将使用全量搜索: %v", err)
-	} else {
-		vectorIndex = vIndex
+		return err
 	}
 
-	// 创建内存搜索器
-	searcher, err := xdb.NewWithVectorIndex(dbPath, vectorIndex)
+	searcherV6, vIndexV6, err := initIPSearcher(dbPathV6, "v6")
 	if err != nil {
-		return fmt.Errorf("创建 ip2region 搜索器失败: %v", err)
+		return err
 	}
 
-	ipSearcher = searcher
+	ipSearcherV4 = searcherV4
+	ipSearcherV6 = searcherV6
+	vectorIndexV4 = vIndexV4
+	vectorIndexV6 = vIndexV6
 	logrus.Info("ip2region 初始化成功")
 	return nil
+}
+
+func initIPSearcher(path, label string) (*xdb.Searcher, []byte, error) {
+	header, err := xdb.LoadHeaderFromFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("读取 ip2region %s 数据库头失败: %v", label, err)
+	}
+
+	version, err := xdb.VersionFromHeader(header)
+	if err != nil {
+		return nil, nil, fmt.Errorf("识别 ip2region %s 版本失败: %v", label, err)
+	}
+
+	vIndex, err := xdb.LoadVectorIndexFromFile(path)
+	if err != nil {
+		logrus.Warnf("加载 ip2region %s 矢量索引失败，将使用全量搜索: %v", label, err)
+	}
+
+	searcher, err := xdb.NewWithVectorIndex(version, path, vIndex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("创建 ip2region %s 搜索器失败: %v", label, err)
+	}
+
+	return searcher, vIndex, nil
 }
 
 // GetIPLocation 获取 IP 的地理位置信息
@@ -155,35 +195,32 @@ func GetIPLocation(ip string) (string, string, error) {
 		return "内网", "本地网络", nil
 	}
 
-	var domestic, global string
-	var err error
-
-	domestic, global, err = queryIPLocationRemote(ip)
-	if err != nil || domestic == "未知" {
-		if parsedIP.To4() != nil {
-			domesticLocal, globalLocal, localErr := queryIPLocationLocal(ip)
-			if localErr == nil && domesticLocal != "未知" {
-				domestic = domesticLocal
-				global = globalLocal
-				err = nil
-			}
-		}
+	localDomestic, localGlobal, _, localErr := queryIPLocationLocalDetailed(ip, parsedIP)
+	localUsable := localErr == nil && localDomestic != "" && localDomestic != "未知" && localGlobal != "" && localGlobal != "未知"
+	if localUsable {
+		setCachedLocation(ip, localDomestic, localGlobal)
+		return localDomestic, localGlobal, nil
 	}
 
-	if err != nil {
-		return "未知", "未知", err
+	remoteDomestic, remoteGlobal, remoteErr := queryIPLocationRemote(ip)
+	if remoteErr != nil {
+		return "未知", "未知", remoteErr
 	}
-
-	setCachedLocation(ip, domestic, global)
-
-	return domestic, global, nil
+	if remoteDomestic == "" {
+		remoteDomestic = "未知"
+	}
+	if remoteGlobal == "" {
+		remoteGlobal = "未知"
+	}
+	setCachedLocation(ip, remoteDomestic, remoteGlobal)
+	return remoteDomestic, remoteGlobal, nil
 }
 
-// GetIPLocationBatch 批量获取 IP 的地理位置信息（优先远端）
-func GetIPLocationBatch(ips []string) map[string]IPLocation {
+// GetIPLocationBatch 批量获取 IP 的地理位置信息（优先本地）
+func GetIPLocationBatch(ips []string) (map[string]IPLocation, error) {
 	results := make(map[string]IPLocation, len(ips))
 	if len(ips) == 0 {
-		return results
+		return results, nil
 	}
 
 	unique := make([]string, 0, len(ips))
@@ -203,99 +240,143 @@ func GetIPLocationBatch(ips []string) map[string]IPLocation {
 	toQuery := make([]string, 0, len(unique))
 	for _, ip := range unique {
 		if domestic, global, ok := getCachedLocation(ip); ok {
-			results[ip] = IPLocation{Domestic: domestic, Global: global}
+			results[ip] = IPLocation{Domestic: domestic, Global: global, Source: "cache"}
 			continue
 		}
 
 		if ip == "localhost" || ip == "127.0.0.1" || ip == "::1" {
-			results[ip] = IPLocation{Domestic: "本地", Global: "本地"}
+			results[ip] = IPLocation{Domestic: "本地", Global: "本地", Source: "local"}
 			setCachedLocation(ip, "本地", "本地")
 			continue
 		}
 
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil {
-			results[ip] = IPLocation{Domestic: "未知", Global: "未知"}
+			results[ip] = IPLocation{Domestic: "未知", Global: "未知", Source: "invalid"}
 			setCachedLocation(ip, "未知", "未知")
 			continue
 		}
 
 		if isPrivateIP(parsedIP) {
-			results[ip] = IPLocation{Domestic: "内网", Global: "本地网络"}
+			results[ip] = IPLocation{Domestic: "内网", Global: "本地网络", Source: "local"}
 			setCachedLocation(ip, "内网", "本地网络")
 			continue
 		}
 
+		localDomestic, localGlobal, _, localErr := queryIPLocationLocalDetailed(ip, parsedIP)
+		if localErr == nil && localDomestic != "" && localDomestic != "未知" && localGlobal != "" && localGlobal != "未知" {
+			results[ip] = IPLocation{Domestic: localDomestic, Global: localGlobal, Source: "local"}
+			setCachedLocation(ip, localDomestic, localGlobal)
+			continue
+		}
 		toQuery = append(toQuery, ip)
 	}
 
 	if len(toQuery) == 0 {
-		return results
+		return results, nil
 	}
 
-	remoteResults, _ := queryIPLocationRemoteBatch(toQuery)
+	remoteResults, remoteErr := queryIPLocationRemoteBatch(toQuery)
 	for _, ip := range toQuery {
 		if entry, ok := remoteResults[ip]; ok && entry.Domestic != "" && entry.Domestic != "未知" {
-			results[ip] = IPLocation{Domestic: entry.Domestic, Global: entry.Global}
+			results[ip] = IPLocation{Domestic: entry.Domestic, Global: entry.Global, Source: "remote"}
 			setCachedLocation(ip, entry.Domestic, entry.Global)
 			continue
 		}
 
-		parsedIP := net.ParseIP(ip)
-		if parsedIP != nil && parsedIP.To4() != nil {
-			domestic, global, err := queryIPLocationLocal(ip)
-			if err == nil && domestic != "" && domestic != "未知" {
-				results[ip] = IPLocation{Domestic: domestic, Global: global}
-				setCachedLocation(ip, domestic, global)
-				continue
-			}
+		if remoteErr == nil {
+			results[ip] = IPLocation{Domestic: "未知", Global: "未知", Source: "unknown"}
+			setCachedLocation(ip, "未知", "未知")
 		}
-
-		results[ip] = IPLocation{Domestic: "未知", Global: "未知"}
-		setCachedLocation(ip, "未知", "未知")
 	}
 
-	return results
+	return results, remoteErr
 }
 
-// 查询 IP 地理位置（本地库）
-func queryIPLocationLocal(ip string) (string, string, error) {
-	if ipSearcher == nil {
-		return "未知", "未知", fmt.Errorf("ip2region 未初始化")
+func queryIPLocationLocalRegion(ip string, parsedIP net.IP) (string, error) {
+	searcher, err := pickIPSearcher(parsedIP)
+	if err != nil {
+		return "", err
 	}
 
-	// 设置 50 毫秒超时
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// 使用 channel 处理超时
 	resultCh := make(chan struct {
 		region string
 		err    error
 	}, 1)
 
 	go func() {
-		var region string
-		var err error
-
-		region, err = ipSearcher.SearchByStr(ip)
-
+		region, err := searcher.SearchByStr(ip)
 		resultCh <- struct {
 			region string
 			err    error
 		}{region, err}
 	}()
 
-	// 等待结果或超时
 	select {
 	case <-ctx.Done():
-		return "未知", "未知", fmt.Errorf("IP 查询超时")
+		return "", fmt.Errorf("IP 查询超时")
 	case result := <-resultCh:
 		if result.err != nil {
-			return "未知", "未知", result.err
+			return "", result.err
 		}
-		return parseIPRegion(result.region)
+		return result.region, nil
 	}
+}
+
+func pickIPSearcher(ip net.IP) (*xdb.Searcher, error) {
+	if ip == nil {
+		return nil, fmt.Errorf("无效的 IP 地址")
+	}
+
+	if ip.To4() != nil {
+		if ipSearcherV4 == nil {
+			return nil, fmt.Errorf("ip2region v4 未初始化")
+		}
+		return ipSearcherV4, nil
+	}
+
+	if ip.To16() != nil {
+		if ipSearcherV6 == nil {
+			return nil, fmt.Errorf("ip2region v6 未初始化")
+		}
+		return ipSearcherV6, nil
+	}
+
+	return nil, fmt.Errorf("无效的 IP 地址")
+}
+
+func queryIPLocationLocalDetailed(ip string, parsedIP net.IP) (string, string, bool, error) {
+	if parsedIP == nil {
+		parsedIP = net.ParseIP(ip)
+		if parsedIP == nil {
+			return "未知", "未知", false, fmt.Errorf("无效的 IP 地址")
+		}
+	}
+
+	region, err := queryIPLocationLocalRegion(ip, parsedIP)
+	if err != nil {
+		return "未知", "未知", false, err
+	}
+	domestic, global, err := parseIPRegion(region)
+	if err != nil {
+		return domestic, global, false, err
+	}
+	parts := splitRegion(region)
+	city := ""
+	if len(parts) > 3 {
+		city = strings.TrimSpace(parts[3])
+	}
+	hasCity := city != "" && city != "0" && city != "未知"
+	return domestic, global, hasCity, nil
+}
+
+// 查询 IP 地理位置（本地库）
+func queryIPLocationLocal(ip string) (string, string, error) {
+	domestic, global, _, err := queryIPLocationLocalDetailed(ip, nil)
+	return domestic, global, err
 }
 
 // 查询 IP 地理位置（远程接口）
@@ -319,6 +400,7 @@ func queryIPLocationRemoteBatch(ips []string) (map[string]ipLocationCacheEntry, 
 
 	client := &http.Client{Timeout: ipAPITimeout}
 	var lastErr error
+	apiURL := resolveIPAPIURL()
 
 	for start := 0; start < len(ips); start += ipAPIBatchSize {
 		end := start + ipAPIBatchSize
@@ -343,7 +425,7 @@ func queryIPLocationRemoteBatch(ips []string) (map[string]ipLocationCacheEntry, 
 			continue
 		}
 
-		req, err := http.NewRequest(http.MethodPost, ipAPIBatchURL, bytes.NewReader(requestBody))
+		req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(requestBody))
 		if err != nil {
 			lastErr = err
 			continue
@@ -508,6 +590,10 @@ func resolveIPAPILanguage() string {
 	default:
 		return config.DefaultLanguage
 	}
+}
+
+func resolveIPAPIURL() string {
+	return config.GetIPGeoAPIURL()
 }
 
 func getCachedLocation(ip string) (string, string, bool) {

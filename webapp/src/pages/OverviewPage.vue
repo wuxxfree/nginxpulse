@@ -328,6 +328,9 @@
             <button class="link-button" @click="openDetail('geo')">{{ t('overview.detail') }}</button>
           </div>
         </div>
+        <div v-if="geoPending" class="geo-pending-note">
+          {{ t('overview.geoPendingNotice') }}
+        </div>
         <div class="geo-content">
           <div class="map-container">
             <div id="geo-map" ref="geoMapRef"></div>
@@ -512,6 +515,9 @@
           <div class="detail-ip-notice" v-if="detailMode === 'logs' && detailParsingPending">
             {{ t('logs.backfillParsing', { progress: detailParsingPendingProgressLabel }) }}
           </div>
+          <div class="detail-ip-notice" v-if="detailMode === 'logs' && (detailIpGeoParsing || detailIpGeoPending)">
+            {{ detailIpGeoParsingMessage }}
+          </div>
           <div class="detail-list">
             <div class="table-wrapper">
               <table class="ranking-table" :class="{ 'detail-logs': detailMode === 'logs' }">
@@ -648,6 +654,7 @@ const browserStats = ref<SimpleSeriesStats | null>(null);
 const osStats = ref<SimpleSeriesStats | null>(null);
 const deviceStats = ref<SimpleSeriesStats | null>(null);
 const geoData = ref<Array<{ name: string; value: number; percentage: number }>>([]);
+const geoPending = ref(false);
 
 const visitsChartRef = ref<HTMLCanvasElement | null>(null);
 const newOldChartRef = ref<HTMLCanvasElement | null>(null);
@@ -822,11 +829,20 @@ const detailLoading = ref(false);
 const detailError = ref(false);
 const detailIpParsing = ref(false);
 const detailIpParsingProgress = ref<number | null>(null);
+const detailIpParsingEstimatedRemainingSeconds = ref<number | null>(null);
+const detailIpGeoParsing = ref(false);
+const detailIpGeoPending = ref(false);
+const detailIpGeoProgress = ref<number | null>(null);
+const detailIpGeoEstimatedRemainingSeconds = ref<number | null>(null);
 const detailParsingPending = ref(false);
 const detailParsingPendingProgress = ref<number | null>(null);
 const detailIpParsingProgressText = computed(() => {
   if (detailIpParsingProgress.value === null) {
     return '';
+  }
+  if (detailIpParsingEstimatedRemainingSeconds.value) {
+    const duration = formatDurationSeconds(detailIpParsingEstimatedRemainingSeconds.value);
+    return t('parsing.progressWithRemaining', { value: detailIpParsingProgress.value, duration });
   }
   return t('parsing.progress', { value: detailIpParsingProgress.value });
 });
@@ -837,6 +853,39 @@ const detailIpParsingProgressLabel = computed(() => {
   return currentLocale.value === 'zh-CN'
     ? `（${detailIpParsingProgressText.value}）`
     : ` (${detailIpParsingProgressText.value})`;
+});
+
+const detailIpGeoProgressText = computed(() => {
+  if (detailIpGeoProgress.value === null) {
+    return '';
+  }
+  return t('parsing.progress', { value: detailIpGeoProgress.value });
+});
+const detailIpGeoProgressLabel = computed(() => {
+  if (!detailIpGeoProgressText.value) {
+    return '';
+  }
+  return currentLocale.value === 'zh-CN'
+    ? `（${detailIpGeoProgressText.value}）`
+    : ` (${detailIpGeoProgressText.value})`;
+});
+const detailIpGeoRemainingLabel = computed(() => {
+  if (detailIpGeoEstimatedRemainingSeconds.value === null) {
+    return '';
+  }
+  return formatDurationSeconds(detailIpGeoEstimatedRemainingSeconds.value);
+});
+const detailIpGeoParsingMessage = computed(() => {
+  if (detailIpGeoProgressLabel.value && detailIpGeoRemainingLabel.value) {
+    return t('logs.ipGeoParsingProgress', {
+      progress: detailIpGeoProgressLabel.value,
+      remaining: detailIpGeoRemainingLabel.value,
+    });
+  }
+  if (detailIpGeoProgressLabel.value) {
+    return t('logs.ipGeoParsingProgressOnly', { progress: detailIpGeoProgressLabel.value });
+  }
+  return t('logs.ipGeoParsing');
 });
 
 const detailParsingPendingProgressText = computed(() => {
@@ -1286,6 +1335,7 @@ async function loadGeoMap() {
   const range = dateRange.value;
 
   try {
+    geoPending.value = false;
     const statsData = await fetchLocationStats(
       currentWebsiteId.value,
       range,
@@ -1296,6 +1346,8 @@ async function loadGeoMap() {
     if (requestId !== mapRequestId) {
       return;
     }
+
+    geoPending.value = Boolean(statsData?.key?.some((name: string) => isPendingGeoName(name)));
 
     const rows = (statsData?.key || []).map((location: string, index: number) => ({
       name: location,
@@ -1698,6 +1750,11 @@ async function openDetail(type: string) {
   detailError.value = false;
   detailIpParsing.value = false;
   detailIpParsingProgress.value = null;
+  detailIpParsingEstimatedRemainingSeconds.value = null;
+  detailIpGeoParsing.value = false;
+  detailIpGeoPending.value = false;
+  detailIpGeoProgress.value = null;
+  detailIpGeoEstimatedRemainingSeconds.value = null;
   detailParsingPending.value = false;
   detailLoadState.value = 'ready';
   detailRequestId += 1;
@@ -1730,6 +1787,11 @@ function closeDetail() {
   detailPage.value = 1;
   detailIpParsing.value = false;
   detailIpParsingProgress.value = null;
+  detailIpParsingEstimatedRemainingSeconds.value = null;
+  detailIpGeoParsing.value = false;
+  detailIpGeoPending.value = false;
+  detailIpGeoProgress.value = null;
+  detailIpGeoEstimatedRemainingSeconds.value = null;
   detailParsingPending.value = false;
   detailRankingRows.value = [];
   detailLogRows.value = [];
@@ -1879,6 +1941,11 @@ async function loadDetailLogs(reset: boolean, requestId: number) {
       detailLoadState.value = detailHasMore.value ? 'ready' : 'done';
       detailIpParsing.value = false;
       detailIpParsingProgress.value = null;
+      detailIpParsingEstimatedRemainingSeconds.value = null;
+      detailIpGeoParsing.value = false;
+      detailIpGeoPending.value = false;
+      detailIpGeoProgress.value = null;
+      detailIpGeoEstimatedRemainingSeconds.value = null;
       return;
     }
 
@@ -1909,6 +1976,17 @@ async function loadDetailLogs(reset: boolean, requestId: number) {
 
     detailIpParsing.value = Boolean(result.ip_parsing);
     detailIpParsingProgress.value = detailIpParsing.value ? normalizeProgress(result.ip_parsing_progress) : null;
+    detailIpParsingEstimatedRemainingSeconds.value = detailIpParsing.value
+      ? normalizeSeconds(result.ip_parsing_estimated_remaining_seconds)
+      : null;
+    detailIpGeoParsing.value = Boolean(result.ip_geo_parsing);
+    detailIpGeoPending.value = Boolean(result.ip_geo_pending);
+    detailIpGeoProgress.value = detailIpGeoParsing.value || detailIpGeoPending.value
+      ? normalizeProgress(result.ip_geo_progress)
+      : null;
+    detailIpGeoEstimatedRemainingSeconds.value = detailIpGeoParsing.value || detailIpGeoPending.value
+      ? normalizeSeconds(result.ip_geo_estimated_remaining_seconds)
+      : null;
     detailParsingPending.value = Boolean(result.parsing_pending);
     detailParsingPendingProgress.value = detailParsingPending.value
       ? normalizeProgress(result.parsing_pending_progress)
@@ -1927,6 +2005,11 @@ async function loadDetailLogs(reset: boolean, requestId: number) {
     detailLoadState.value = 'error';
     detailIpParsing.value = false;
     detailIpParsingProgress.value = null;
+    detailIpParsingEstimatedRemainingSeconds.value = null;
+    detailIpGeoParsing.value = false;
+    detailIpGeoPending.value = false;
+    detailIpGeoProgress.value = null;
+    detailIpGeoEstimatedRemainingSeconds.value = null;
     detailParsingPending.value = false;
     detailParsingPendingProgress.value = null;
   } finally {
@@ -2429,6 +2512,17 @@ function normalizeProgress(value: unknown): number | null {
   return Math.min(100, Math.max(0, Math.round(value)));
 }
 
+function normalizeSeconds(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.round(value);
+  if (normalized <= 0) {
+    return null;
+  }
+  return normalized;
+}
+
 type DetailConfig = {
   title: string;
   keyLabel?: string;
@@ -2702,6 +2796,15 @@ function normalizeWorldRegionName(name: string) {
   return zhWordNameMap[trimmed] || trimmed;
 }
 
+function isPendingGeoName(name: string) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  return trimmed === '待解析' || trimmed === '解析中' || lower === 'pending' || lower === 'resolving';
+}
+
 function isExcludedGeoName(name: string) {
   const trimmed = String(name || '').trim();
   if (!trimmed) {
@@ -2709,6 +2812,7 @@ function isExcludedGeoName(name: string) {
   }
   const lower = trimmed.toLowerCase();
   return (
+    isPendingGeoName(trimmed) ||
     trimmed === '国外' ||
     trimmed === '未知' ||
     lower === 'overseas' ||

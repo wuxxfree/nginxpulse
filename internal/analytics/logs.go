@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/likaia/nginxpulse/internal/ingest"
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 )
@@ -33,13 +34,19 @@ type LogEntry struct {
 
 // LogsStats 日志查询结果
 type LogsStats struct {
-	Logs                   []LogEntry `json:"logs"`
-	IPParsing              bool       `json:"ip_parsing"`
-	IPParsingProgress      int        `json:"ip_parsing_progress"`
-	ParsingPending         bool       `json:"parsing_pending"`
-	ParsingPendingRange    *TimeRange `json:"parsing_pending_range,omitempty"`
-	ParsingPendingProgress int        `json:"parsing_pending_progress,omitempty"`
-	Pagination             struct {
+	Logs                               []LogEntry `json:"logs"`
+	IPParsing                          bool       `json:"ip_parsing"`
+	IPParsingProgress                  int        `json:"ip_parsing_progress"`
+	IPParsingEstimatedTotalSeconds     int64      `json:"ip_parsing_estimated_total_seconds,omitempty"`
+	IPParsingEstimatedRemainingSeconds int64      `json:"ip_parsing_estimated_remaining_seconds,omitempty"`
+	IPGeoParsing                       bool       `json:"ip_geo_parsing"`
+	IPGeoPending                       bool       `json:"ip_geo_pending"`
+	IPGeoProgress                      int        `json:"ip_geo_progress,omitempty"`
+	IPGeoEstimatedRemainingSeconds     int64      `json:"ip_geo_estimated_remaining_seconds,omitempty"`
+	ParsingPending                     bool       `json:"parsing_pending"`
+	ParsingPendingRange                *TimeRange `json:"parsing_pending_range,omitempty"`
+	ParsingPendingProgress             int        `json:"parsing_pending_progress,omitempty"`
+	Pagination                         struct {
 		Total    int `json:"total"`
 		Page     int `json:"page"`
 		PageSize int `json:"pageSize"`
@@ -72,8 +79,21 @@ func NewLogsStatsManager(userRepoPtr *store.Repository) *LogsStatsManager {
 // Query 实现 StatsManager 接口
 func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	result := LogsStats{}
+	const botDeviceLabel = "蜘蛛"
 	result.IPParsing = ingest.IsIPParsing()
 	result.IPParsingProgress = ingest.GetIPParsingProgress()
+	result.IPParsingEstimatedTotalSeconds = ingest.GetIPParsingEstimatedTotalSeconds()
+	result.IPParsingEstimatedRemainingSeconds = ingest.GetIPParsingEstimatedRemainingSeconds()
+	result.IPGeoParsing = ingest.IsIPGeoParsing()
+	if m.repo != nil {
+		if pendingCount, err := m.repo.CountIPGeoPending(); err == nil {
+			result.IPGeoPending = pendingCount > 0
+			if pendingCount > 0 {
+				result.IPGeoProgress = ingest.GetIPGeoParsingProgress(pendingCount)
+				result.IPGeoEstimatedRemainingSeconds = ingest.GetIPGeoEstimatedRemainingSeconds(pendingCount)
+			}
+		}
+	}
 
 	// 从查询参数中获取分页和排序信息
 	page := 1
@@ -87,6 +107,8 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	var statusCode int
 	var statusClass string
 	var excludeInternal bool
+	var excludeSpider bool
+	var excludeForeign bool
 	var ipFilter string
 	var locationFilter string
 	var urlFilter string
@@ -153,6 +175,12 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	}
 	if excludeInternalVal, ok := query.ExtraParam["excludeInternal"].(bool); ok {
 		excludeInternal = excludeInternalVal
+	}
+	if excludeSpiderVal, ok := query.ExtraParam["excludeSpider"].(bool); ok {
+		excludeSpider = excludeSpiderVal
+	}
+	if excludeForeignVal, ok := query.ExtraParam["excludeForeign"].(bool); ok {
+		excludeForeign = excludeForeignVal
 	}
 	if ipFilterVal, ok := query.ExtraParam["ipFilter"].(string); ok {
 		ipFilter = strings.TrimSpace(ipFilterVal)
@@ -329,6 +357,14 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 		conditions = append(conditions, fmt.Sprintf("NOT %s", internalCondition))
 		args = append(args, internalArgs...)
 	}
+	if excludeSpider {
+		conditions = append(conditions, fmt.Sprintf("%s <> ?", column("user_device")))
+		args = append(args, botDeviceLabel)
+	}
+	if excludeForeign {
+		conditions = append(conditions, fmt.Sprintf("(%s = ? OR LOWER(%s) = ?)", column("global_location"), column("global_location")))
+		args = append(args, "中国", "china")
+	}
 	if pageviewOnly {
 		conditions = append(conditions, fmt.Sprintf("%s = 1", column("pageview_flag")))
 	}
@@ -406,7 +442,8 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	}
 
 	// 执行查询
-	rows, err := m.repo.GetDB().Query(queryBuilder.String(), args...)
+	queryStr := sqlutil.ReplacePlaceholders(queryBuilder.String())
+	rows, err := m.repo.GetDB().Query(queryStr, args...)
 	if err != nil {
 		return result, fmt.Errorf("查询日志失败: %v", err)
 	}
@@ -437,7 +474,7 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 		// 处理时间
 		log.Time = time.Unix(log.Timestamp, 0).Format("2006-01-02 15:04:05")
 
-		// 处理pageview_flag (SQLite中存储为0/1)
+		// 处理 pageview_flag (数据库中存储为 0/1)
 		log.PageviewFlag = pageviewFlag == 1
 		if includeNewVisitor {
 			log.IsNewVisitor = isNewVisitor == 1
@@ -519,6 +556,14 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 		countConditions = append(countConditions, fmt.Sprintf("NOT %s", internalCondition))
 		countArgs = append(countArgs, internalArgs...)
 	}
+	if excludeSpider {
+		countConditions = append(countConditions, fmt.Sprintf("%s <> ?", column("user_device")))
+		countArgs = append(countArgs, botDeviceLabel)
+	}
+	if excludeForeign {
+		countConditions = append(countConditions, fmt.Sprintf("(%s = ? OR LOWER(%s) = ?)", column("global_location"), column("global_location")))
+		countArgs = append(countArgs, "中国", "china")
+	}
 	if pageviewOnly {
 		countConditions = append(countConditions, fmt.Sprintf("%s = 1", column("pageview_flag")))
 	}
@@ -537,7 +582,8 @@ func (m *LogsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	}
 
 	var total int
-	err = m.repo.GetDB().QueryRow(countQuery.String(), countArgs...).Scan(&total)
+	countQueryStr := sqlutil.ReplacePlaceholders(countQuery.String())
+	err = m.repo.GetDB().QueryRow(countQueryStr, countArgs...).Scan(&total)
 	if err != nil {
 		return result, fmt.Errorf("获取日志总数失败: %v", err)
 	}

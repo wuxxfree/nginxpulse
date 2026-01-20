@@ -10,6 +10,9 @@
 
 Lightweight Nginx access log analytics and visualization dashboard with realtime stats, PV filtering, IP geo lookup, and client parsing.
 
+Wiki (detailed docs & examples): https://github.com/likaia/nginxpulse/wiki
+Wiki sync script: `bash scripts/push_wiki.sh`
+
 ![en-demo-img-1.png](docs/en-demo-img-1.png)
 
 ![en-demo-img-2.png](docs/en-demo-img-2.png)
@@ -20,6 +23,7 @@ Lightweight Nginx access log analytics and visualization dashboard with realtime
 - [How to Use](#how-to-use)
   - [1) Docker](#1-docker)
   - [2) Docker Compose](#2-docker-compose)
+  - [Time Zone (Important)](#time-zone-important)
   - [3) Manual Build (Frontend + Backend)](#3-manual-build-frontend--backend)
   - [4) Single Binary Deployment](#4-single-binary-deployment)
   - [5) Makefile Commands](#5-makefile-commands)
@@ -34,27 +38,59 @@ Lightweight Nginx access log analytics and visualization dashboard with realtime
 - [Directory Structure](#directory-structure)
 
 ## Tech Stack
-- **Backend**: `Go 1.23.x` · `Gin` · `Logrus`
-- **Data**: `SQLite (modernc.org/sqlite)`
+**IMPORTANT (version > 1.5.3)**: SQLite is removed. Single-binary deployment requires your own PostgreSQL and a configured `DB_DSN` (or `database.dsn`). Docker images include PostgreSQL.
+- **Backend**: `Go 1.24.x` · `Gin` · `Logrus`
+- **Data**: `PostgreSQL (pgx)`
 - **IP Geo**: `ip2region` (local) + `ip-api.com` (remote batch)
 - **Frontend**: `Vue 3` · `Vite` · `TypeScript` · `PrimeVue` · `ECharts/Chart.js` · `Scss`
 - **Container**: `Docker / Docker Compose` · `Nginx` (static frontend)
 
 ## IP Geo Lookup Strategy
 1. **Fast filter**: empty/local/loopback returns “local”, intranet returns “intranet/local network”.
-2. **Cache first**: in-memory cache hit returns directly (up to 50,000 entries).
-3. **Remote first**: call `ip-api.com/batch` (timeout 1.2s, max 100 IPs per batch).
-4. **Local fallback**: if remote fails or returns “unknown”, IPv4 falls back to local ip2region (50ms timeout).
-5. **IPv6 handling**: only remote lookup; failure returns “unknown”.
+2. **Decouple parsing**: log parsing stores “Pending” locations first, then a background task resolves and backfills IP geo.
+3. **Cache first**: persistent cache + in-memory cache hit returns directly (default max 1,000,000 rows).
+4. **Local first (IPv4/IPv6)**: query ip2region first and use it when the result is usable.
+5. **Remote enrich**: if local lookup fails or returns “unknown”, call the remote API (default `ip-api.com/batch`, configurable) (timeout 1.2s, max 100 IPs per batch).
+6. **Remote failure**: return “unknown”.
 
-> The local database `ip2region.xdb` is embedded in the binary. On first startup it is extracted to `./var/nginxpulse_data/ip2region.xdb` and vector indexes are loaded when possible.
+> While geo backfill is running, the UI shows “Pending” and location stats may be incomplete.
 
-> This project calls an external IP geo API (`ip-api.com`). Ensure outbound access is allowed.
+> The local databases `ip2region_v4.xdb` and `ip2region_v6.xdb` are embedded in the binary. On first startup they are extracted to `./var/nginxpulse_data/` and vector indexes are loaded when possible.
+
+> This project calls an external IP geo API (default `ip-api.com`). Ensure outbound access is allowed.
+
+## Custom IP Geo API
+You can configure the remote endpoint via `system.ipGeoApiUrl` or `IP_GEO_API_URL`.
+Note: when implementing a custom API service, follow the contract in this section strictly; otherwise the parser will not work correctly.
+
+Request:
+- `POST` JSON with `Content-Type: application/json`
+- Body is an array; each item contains:
+  - `query`: IP string
+  - `fields`: requested fields (can be ignored)
+  - `lang`: language (`zh-CN` / `en`, can be ignored)
+
+Response:
+- JSON array (same order as request, or match by `query`)
+- Each item must include the fields below:
+  - `status`: `success` for success, other values treated as failure
+  - `message`: error details (optional)
+  - `query`: IP string (used to match results)
+  - `country`: country name (global dimension)
+  - `countryCode`: country code (e.g. `CN`, `US`)
+  - `region`: region code (optional)
+  - `regionName`: state/province name
+  - `city`: city name
+  - `isp`: ISP name (optional)
+
+If `status != success` or location fields are empty, the result is stored as “unknown”.
 
 ## How to Use
 
 ### 1) Docker
 Single image (frontend Nginx + backend service):
+> The image bundles PostgreSQL and initializes the database on startup.
+> **Required**: bind-mount `/app/var/nginxpulse_data` and `/app/var/pgdata`. The container will exit if they are not mounted.
 
 Use remote image (Docker Hub):
 
@@ -64,7 +100,9 @@ docker run -d --name nginxpulse \
   -p 8089:8089 \
   -e WEBSITES='[{"name":"Main","logPath":"/share/log/nginx/access.log","domains":["kaisir.cn","www.kaisir.cn"]}]' \
   -v ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro \
+  -v /etc/localtime:/etc/localtime:ro \
   -v "$(pwd)/var/nginxpulse_data:/app/var/nginxpulse_data" \
+  -v "$(pwd)/var/pgdata:/app/var/pgdata" \
   magiccoders/nginxpulse:latest
 ```
 
@@ -77,7 +115,9 @@ docker run -d --name nginxpulse \
   -p 8089:8089 \
   -e WEBSITES='[{"name":"Main","logPath":"/share/log/nginx/access.log","domains":["kaisir.cn","www.kaisir.cn"]}]' \
   -v ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro \
+  -v /etc/localtime:/etc/localtime:ro \
   -v "$(pwd)/var/nginxpulse_data:/app/var/nginxpulse_data" \
+  -v "$(pwd)/var/pgdata:/app/var/pgdata" \
   nginxpulse:local
 ```
 
@@ -101,6 +141,7 @@ GitHub Actions release:
 - Trigger by pushing `v*` tag or creating a release.
 
 > If you prefer config file, mount `configs/nginxpulse_config.json` to `/app/configs/nginxpulse_config.json`.
+> If no config file or env vars are provided, the first launch will open the Setup Wizard. It writes to `configs/nginxpulse_config.json`; restart the container to apply changes (mount `/app/configs` for persistence).
 
 ### 2) Docker Compose
 Use remote image (Docker Hub): replace `docker-compose.yml` with the remote image version and run:
@@ -131,9 +172,22 @@ services:
     volumes:
       - ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro
       - ./var/nginxpulse_data:/app/var/nginxpulse_data
+      - ./var/pgdata:/app/var/pgdata
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
 ```
+
+### Time Zone (Important)
+This project uses the **system time zone** for log parsing and stats. Make sure the runtime time zone is correct.
+
+**Docker / Docker Compose**
+- Recommended: mount host time zone file `-v /etc/localtime:/etc/localtime:ro` (Linux)
+- If `/etc/timezone` exists on the host, you can also mount it: `-v /etc/timezone:/etc/timezone:ro`
+- If you prefer to set a time zone, use `TZ=Asia/Shanghai`, but ensure tzdata exists in the container (install `tzdata` or mount `/usr/share/zoneinfo`)
+
+**Single Binary**
+- Uses the system time zone by default
+- Override temporarily: `TZ=Asia/Shanghai ./nginxpulse`
 
 Example `docker-compose.yml` (local build):
 
@@ -175,6 +229,10 @@ Environment variables:
   - Scan interval, Go duration format like `5m`, `25s`.
 - `LOG_RETENTION_DAYS` (optional, default `30`)
   - Database retention in days.
+- `LOG_PARSE_BATCH_SIZE` (optional, default `100`)
+  - Batch size for log inserts during parsing; larger values may use more memory.
+- `IP_GEO_CACHE_LIMIT` (optional, default `1000000`)
+  - Max rows for IP geo cache; oldest records are purged when exceeded.
 - `DEMO_MODE` (optional, default `false`)
   - Enable demo mode, generates mock logs and skips file parsing.
 - `ACCESS_KEYS` (optional, default empty)
@@ -227,6 +285,9 @@ Local dev (frontend + backend together):
 > Prepare logs in `var/log/` (or ensure `configs/nginxpulse_config.json` points to the file).
 
 ### 4) Single Binary Deployment
+**IMPORTANT (version > 1.5.3)**: SQLite is removed. Single-binary deployment requires your own PostgreSQL and a configured `DB_DSN` (or `database.dsn` in `configs/nginxpulse_config.json`).  
+Docker images include PostgreSQL, no extra installation needed.
+
 To distribute a single binary (frontend bundled), use:
 
 ```bash
@@ -321,6 +382,11 @@ Sample logs: `var/log/gz-log-read-test/`.
 
 ## Remote Log Sources (sources)
 When logs cannot be mounted locally, configure `sources` in the website config. Once `sources` is set, `logPath` is ignored.
+
+`sources` accepts a **JSON array**, where each item represents one log source. This design allows:
+1) Multiple sources per site (multi-host, multi-path, multi-bucket).
+2) Different parsing/auth/polling strategies per source for easy extension and rollout.
+3) Clean separation for rotation/archival inputs without modifying existing sources.
 
 Remote log sources support three access methods:
 1) **Expose logs via HTTP** (Nginx/Apache or custom service)
@@ -666,25 +732,38 @@ PV_EXCLUDE_IPS='[]'
 ```
 After restart, click “Re-parse” in the Log Details page.
 
+3) Log timestamps look wrong  
+This is usually a time zone mismatch. Check the runtime time zone and adjust it per “Time Zone (Important)”, then re-parse the logs.
+
 ## Notes for Development
 
 ### Dependencies
-- Go 1.23.x (as in `go.mod`)
+- Go 1.24.x (as in `go.mod`)
 - Node.js 20+ / npm
 - Docker (optional)
 
 ### Config and Data
 - Config file: `configs/nginxpulse_config.json`
 - Data dir: `var/nginxpulse_data/` (relative to working dir)
-  - `nginxpulse.db`: SQLite database
   - `nginx_scan_state.json`: log scan cursor
-  - `ip2region.xdb`: IP local DB
-- Dimension table de-dup migration runs on first startup; cleanup removes orphan rows.
+  - `ip2region_v4.xdb`: IPv4 local DB
+  - `ip2region_v6.xdb`: IPv6 local DB
+  - `nginxpulse.log`: application runtime log (parsing progress/warnings), not used for analytics
+  - `nginxpulse_backup.log`: rotated runtime log (auto-rotates over 5MB)
+- Docker image bundles PostgreSQL; default data dir: `var/pgdata/`
+- Database is provided by PostgreSQL and is not stored under the data dir.
+- The first run creates database tables and cleanup removes orphan rows.
 - DB contains dimension and aggregate tables (`*_dim_*`, `*_agg_*`) for speed.
 - Env overrides:
   - `CONFIG_JSON` / `WEBSITES`
   - `LOG_DEST` / `TASK_INTERVAL` / `SERVER_PORT`
+  - `LOG_RETENTION_DAYS` / `LOG_PARSE_BATCH_SIZE` / `IP_GEO_CACHE_LIMIT`
+  - `IP_GEO_API_URL`
   - `PV_STATUS_CODES` / `PV_EXCLUDE_PATTERNS` / `PV_EXCLUDE_IPS`
+  - `DB_DRIVER` / `DB_DSN`
+  - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME`
+  - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`
+  - `POSTGRES_PORT` / `POSTGRES_LISTEN` / `POSTGRES_CONNECT_HOST` / `PGDATA`
 
 ### Large Log Parsing Strategy
 - Parse the most recent 7 days first so the UI becomes usable quickly.
@@ -757,7 +836,7 @@ By default, internal/reserved IPs are excluded. If you want to include intranet 
 │   ├── server/
 │   │   └── http.go                 # HTTP and middleware
 │   ├── store/
-│   │   └── repository.go           # SQLite schema + writes
+│   │   └── repository.go           # PostgreSQL schema + writes
 │   ├── version/
 │   │   └── info.go                 # version injection
 │   ├── webui/

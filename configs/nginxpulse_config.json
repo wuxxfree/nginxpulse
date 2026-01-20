@@ -10,9 +10,19 @@
     "logDestination": "file",
     "taskInterval": "1m",
     "logRetentionDays": 30,
+    "parseBatchSize": 100,
+    "ipGeoCacheLimit": 1000000,
+    "ipGeoApiUrl": "http://ip-api.com/batch",
     "demoMode": false,
     "accessKeys": [],
     "language": "zh-CN"
+  },
+  "database": {
+    "driver": "postgres",
+    "dsn": "postgres://nginxpulse:nginxpulse@127.0.0.1:5432/nginxpulse?sslmode=disable",
+    "maxOpenConns": 10,
+    "maxIdleConns": 5,
+    "connMaxLifetime": "30m"
   },
   "server": {
     "Port": ":8089"

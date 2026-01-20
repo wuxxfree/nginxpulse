@@ -3,6 +3,7 @@ package analytics
 import (
 	"fmt"
 
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 )
@@ -43,12 +44,12 @@ func (m *SessionSummaryStatsManager) Query(query StatsQuery) (StatsResult, error
 
 	tableName := fmt.Sprintf("%s_nginx_logs", query.WebsiteID)
 	rows, err := m.repo.GetDB().Query(
-		fmt.Sprintf(`
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT timestamp, ip_id, ua_id
-        FROM "%s" INDEXED BY idx_%s_session_key
+        FROM "%s"
         WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?
         ORDER BY ip_id, ua_id, timestamp`,
-			tableName, query.WebsiteID),
+			tableName)),
 		startTime.Unix(), endTime.Unix(),
 	)
 	if err != nil {

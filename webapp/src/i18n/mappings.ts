@@ -5,6 +5,10 @@ type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 const labelKeyMap: Record<string, string> = {
   '未知': 'labels.unknown',
   unknown: 'labels.unknown',
+  '待解析': 'labels.geoPending',
+  '解析中': 'labels.geoPending',
+  pending: 'labels.geoPending',
+  resolving: 'labels.geoPending',
   '本地': 'labels.local',
   local: 'labels.local',
   '内网': 'labels.intranet',

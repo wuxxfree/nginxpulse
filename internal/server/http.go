@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,21 +15,26 @@ import (
 )
 
 // StartHTTPServer configures and starts the HTTP server in a goroutine.
-func StartHTTPServer(statsFactory *analytics.StatsFactory, logParser *ingest.LogParser, addr string) *http.Server {
+func StartHTTPServer(statsFactory *analytics.StatsFactory, logParser *ingest.LogParser, addr string) (*http.Server, error) {
 	router := buildRouter(statsFactory, logParser)
 	server := &http.Server{
 		Addr:    addr,
 		Handler: router,
 	}
 
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Error("Failed to start the server")
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			logrus.WithError(err).Error("HTTP 服务器运行失败")
 		}
 	}()
 
 	logrus.Infof("服务器已启动，监听地址: %s", addr)
-	return server
+	return server, nil
 }
 
 func buildRouter(statsFactory *analytics.StatsFactory, logParser *ingest.LogParser) *gin.Engine {

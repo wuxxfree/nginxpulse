@@ -3,17 +3,14 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/likaia/nginxpulse/internal/config"
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/sirupsen/logrus"
-	_ "modernc.org/sqlite"
-)
-
-var (
-	dataSourceName = filepath.Join(config.DataDir, "nginxpulse.db")
 )
 
 type NginxLogRecord struct {
@@ -33,35 +30,65 @@ type NginxLogRecord struct {
 	GlobalLocation   string    `json:"global_location"`
 }
 
+type IPGeoCacheEntry struct {
+	Domestic string
+	Global   string
+	Source   string
+}
+
 type Repository struct {
 	db *sql.DB
 }
 
 func NewRepository() (*Repository, error) {
-	// 打开数据库
-	db, err := sql.Open("sqlite", dataSourceName)
+	cfg := config.ReadConfig()
+	db, err := openPostgres(cfg.Database)
 	if err != nil {
-		return nil, err
-	}
-	// 链接数据库
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	// 性能优化设置
-	if _, err := db.Exec(`
-        PRAGMA journal_mode=WAL;
-        PRAGMA synchronous=NORMAL;
-        PRAGMA cache_size=32768;
-        PRAGMA temp_store=MEMORY;`); err != nil {
-		db.Close()
 		return nil, err
 	}
 
 	return &Repository{
 		db: db,
 	}, nil
+}
+
+func openPostgres(cfg config.DatabaseConfig) (*sql.DB, error) {
+	if cfg.Driver == "" {
+		cfg.Driver = "postgres"
+	}
+	if cfg.Driver != "postgres" {
+		return nil, fmt.Errorf("仅支持 postgres 驱动，当前为: %s", cfg.Driver)
+	}
+	if strings.TrimSpace(cfg.DSN) == "" {
+		return nil, fmt.Errorf("数据库 DSN 不能为空")
+	}
+
+	pgConfig, err := pgx.ParseConfig(cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库 DSN 失败: %w", err)
+	}
+
+	db := stdlib.OpenDB(*pgConfig)
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime != "" {
+		if parsed, err := time.ParseDuration(cfg.ConnMaxLifetime); err == nil {
+			db.SetConnMaxLifetime(parsed)
+		} else {
+			logrus.WithError(err).Warn("无效的数据库连接最大生命周期配置，已忽略")
+		}
+	}
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return db, nil
 }
 
 // 初始化数据库
@@ -81,6 +108,247 @@ func (r *Repository) Close() error {
 // 获取数据库连接
 func (r *Repository) GetDB() *sql.DB {
 	return r.db
+}
+
+func (r *Repository) GetIPGeoCache(ips []string) (map[string]IPGeoCacheEntry, error) {
+	results := make(map[string]IPGeoCacheEntry)
+	if len(ips) == 0 {
+		return results, nil
+	}
+
+	unique := make([]string, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
+	for _, raw := range ips {
+		ip := strings.TrimSpace(raw)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+	if len(unique) == 0 {
+		return results, nil
+	}
+
+	placeholders := make([]string, len(unique))
+	args := make([]interface{}, len(unique))
+	for i, ip := range unique {
+		placeholders[i] = "?"
+		args[i] = ip
+	}
+
+	query := fmt.Sprintf(`SELECT ip, domestic, global, source FROM "ip_geo_cache" WHERE ip IN (%s)`, strings.Join(placeholders, ","))
+	rows, err := r.db.Query(sqlutil.ReplacePlaceholders(query), args...)
+	if err != nil {
+		return results, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ip, domestic, global, source string
+		if err := rows.Scan(&ip, &domestic, &global, &source); err != nil {
+			return results, err
+		}
+		results[ip] = IPGeoCacheEntry{
+			Domestic: domestic,
+			Global:   global,
+			Source:   source,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return results, err
+	}
+	return results, nil
+}
+
+func (r *Repository) UpsertIPGeoPending(ips []string) error {
+	if len(ips) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0, len(ips))
+	args := make([]interface{}, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
+	for _, raw := range ips {
+		ip := strings.TrimSpace(raw)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		values = append(values, "(?)")
+		args = append(args, ip)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+
+	query := fmt.Sprintf(`INSERT INTO "ip_geo_pending" (ip)
+        VALUES %s
+        ON CONFLICT (ip) DO UPDATE SET
+            updated_at = NOW()`, strings.Join(values, ","))
+
+	_, err := r.db.Exec(sqlutil.ReplacePlaceholders(query), args...)
+	return err
+}
+
+func (r *Repository) FetchIPGeoPending(limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := r.db.Query(
+		sqlutil.ReplacePlaceholders(`SELECT ip FROM "ip_geo_pending" ORDER BY updated_at ASC LIMIT ?`),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ips := make([]string, 0, limit)
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, err
+		}
+		ips = append(ips, ip)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ips, nil
+}
+
+func (r *Repository) DeleteIPGeoPending(ips []string) error {
+	if len(ips) == 0 {
+		return nil
+	}
+
+	unique := make([]string, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
+	for _, raw := range ips {
+		ip := strings.TrimSpace(raw)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(unique))
+	args := make([]interface{}, len(unique))
+	for i, ip := range unique {
+		placeholders[i] = "?"
+		args[i] = ip
+	}
+	query := fmt.Sprintf(`DELETE FROM "ip_geo_pending" WHERE ip IN (%s)`, strings.Join(placeholders, ","))
+	_, err := r.db.Exec(sqlutil.ReplacePlaceholders(query), args...)
+	return err
+}
+
+func (r *Repository) HasIPGeoPending() (bool, error) {
+	row := r.db.QueryRow(`SELECT 1 FROM "ip_geo_pending" LIMIT 1`)
+	var marker int
+	if err := row.Scan(&marker); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Repository) CountIPGeoPending() (int64, error) {
+	row := r.db.QueryRow(`SELECT COUNT(*) FROM "ip_geo_pending"`)
+	var total int64
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (r *Repository) UpsertIPGeoCache(entries map[string]IPGeoCacheEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0, len(entries))
+	args := make([]interface{}, 0, len(entries)*4)
+	for ip, entry := range entries {
+		if ip == "" {
+			continue
+		}
+		source := strings.TrimSpace(entry.Source)
+		if source == "" {
+			source = "unknown"
+		}
+		values = append(values, "(?, ?, ?, ?)")
+		args = append(args, ip, entry.Domestic, entry.Global, source)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+
+	query := fmt.Sprintf(`INSERT INTO "ip_geo_cache" (ip, domestic, global, source)
+        VALUES %s
+        ON CONFLICT (ip) DO UPDATE SET
+            domestic = excluded.domestic,
+            global = excluded.global,
+            source = excluded.source,
+            updated_at = NOW()`, strings.Join(values, ","))
+
+	_, err := r.db.Exec(sqlutil.ReplacePlaceholders(query), args...)
+	return err
+}
+
+func (r *Repository) TrimIPGeoCache(limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+
+	var total int64
+	row := r.db.QueryRow(`SELECT COUNT(*) FROM "ip_geo_cache"`)
+	if err := row.Scan(&total); err != nil {
+		return err
+	}
+	if total <= int64(limit) {
+		return nil
+	}
+	excess := total - int64(limit)
+
+	_, err := r.db.Exec(
+		`DELETE FROM "ip_geo_cache"
+         WHERE ip IN (
+             SELECT ip FROM "ip_geo_cache"
+             ORDER BY created_at ASC
+             LIMIT $1
+         )`, excess,
+	)
+	return err
+}
+
+func (r *Repository) HasLogs(websiteID string) (bool, error) {
+	tableName := fmt.Sprintf("%s_nginx_logs", websiteID)
+	query := fmt.Sprintf(`SELECT 1 FROM "%s" LIMIT 1`, tableName)
+	var marker int
+	if err := r.db.QueryRow(query).Scan(&marker); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // 为特定网站批量插入日志记录
@@ -122,12 +390,12 @@ func (r *Repository) BatchInsertLogsForWebsite(websiteID string, logs []NginxLog
 	}
 	defer sessions.Close()
 
-	stmtNginx, err := tx.Prepare(fmt.Sprintf(`
+	stmtNginx, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         INSERT INTO "%s" (
         ip_id, pageview_flag, timestamp, method, url_id, 
         status_code, bytes_sent, referer_id, ua_id, location_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, logTable))
+    `, logTable)))
 	if err != nil {
 		return err
 	}
@@ -225,8 +493,13 @@ func (r *Repository) CleanOldLogs() error {
 	deletedCount := 0
 
 	rows, err := r.db.Query(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE '%_nginx_logs'
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND c.relispartition = false
+          AND c.relname LIKE '%\_nginx_logs' ESCAPE '\'
     `)
 	if err != nil {
 		return fmt.Errorf("查询表名失败: %v", err)
@@ -245,7 +518,8 @@ func (r *Repository) CleanOldLogs() error {
 
 	for _, tableName := range tableNames {
 		result, err := r.db.Exec(
-			fmt.Sprintf(`DELETE FROM "%s" WHERE timestamp < ?`, tableName), cutoffTime,
+			sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE timestamp < ?`, tableName)),
+			cutoffTime,
 		)
 		if err != nil {
 			logrus.WithError(err).Errorf("清理表 %s 的旧日志失败", tableName)
@@ -282,9 +556,6 @@ func (r *Repository) CleanOldLogs() error {
 		}
 
 		logrus.Infof("删除了 %d 条 %d 天前的日志记录", deletedCount, retentionDays)
-		if _, err := r.db.Exec("VACUUM"); err != nil {
-			logrus.WithError(err).Error("数据库压缩失败")
-		}
 	}
 
 	return nil
@@ -321,19 +592,194 @@ func (r *Repository) ClearAllLogs() error {
 			return err
 		}
 	}
-	if _, err := r.db.Exec("VACUUM"); err != nil {
-		logrus.WithError(err).Warn("数据库压缩失败")
-	}
 	return nil
 }
 
 func (r *Repository) createTables() error {
+	if err := r.ensureIPGeoCacheTable(); err != nil {
+		return err
+	}
+	if err := r.ensureIPGeoPendingTable(); err != nil {
+		return err
+	}
 	for _, id := range config.GetAllWebsiteIDs() {
 		if err := r.ensureWebsiteSchema(id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Repository) ensureIPGeoCacheTable() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS "ip_geo_cache" (
+            ip TEXT PRIMARY KEY,
+            domestic TEXT NOT NULL,
+            global TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'unknown',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`,
+		`CREATE INDEX IF NOT EXISTS idx_ip_geo_cache_created_at ON "ip_geo_cache"(created_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := r.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) ensureIPGeoPendingTable() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS "ip_geo_pending" (
+            ip TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`,
+		`CREATE INDEX IF NOT EXISTS idx_ip_geo_pending_updated_at ON "ip_geo_pending"(updated_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := r.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) UpdateIPGeoLocations(
+	locations map[string]IPGeoCacheEntry,
+	pendingLabel string,
+) error {
+	if len(locations) == 0 {
+		return nil
+	}
+	for _, websiteID := range config.GetAllWebsiteIDs() {
+		if err := r.updateIPGeoLocationsForWebsite(websiteID, locations, pendingLabel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) updateIPGeoLocationsForWebsite(
+	websiteID string,
+	locations map[string]IPGeoCacheEntry,
+	pendingLabel string,
+) error {
+	logTable := fmt.Sprintf("%s_nginx_logs", websiteID)
+	exists, err := r.tableExists(logTable)
+	if err != nil || !exists {
+		return err
+	}
+
+	ips := make([]string, 0, len(locations))
+	for ip := range locations {
+		if strings.TrimSpace(ip) != "" {
+			ips = append(ips, ip)
+		}
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	dims, err := prepareDimStatements(tx, websiteID)
+	if err != nil {
+		return err
+	}
+	defer dims.Close()
+
+	ipIDs, err := fetchIPIDs(tx, websiteID, ips)
+	if err != nil {
+		return err
+	}
+	if len(ipIDs) == 0 {
+		return tx.Commit()
+	}
+
+	cache := newDimCaches()
+	pendingKey := locationCacheKey(pendingLabel, pendingLabel)
+	pendingID, err := getOrCreateDimID(
+		cache.location,
+		dims.insertLocation,
+		dims.selectLocation,
+		pendingKey,
+		pendingLabel,
+		pendingLabel,
+	)
+	if err != nil {
+		return err
+	}
+
+	updateLogsStmt, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`UPDATE "%s" SET location_id = ? WHERE ip_id = ? AND location_id = ?`,
+		logTable,
+	)))
+	if err != nil {
+		return err
+	}
+	defer updateLogsStmt.Close()
+
+	sessionTable := fmt.Sprintf("%s_sessions", websiteID)
+	sessionExists, err := r.tableExists(sessionTable)
+	if err != nil {
+		return err
+	}
+	var updateSessionsStmt *sql.Stmt
+	if sessionExists {
+		updateSessionsStmt, err = tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+			`UPDATE "%s" SET location_id = ? WHERE ip_id = ? AND location_id = ?`,
+			sessionTable,
+		)))
+		if err != nil {
+			return err
+		}
+		defer updateSessionsStmt.Close()
+	}
+
+	for ip, ipID := range ipIDs {
+		entry, ok := locations[ip]
+		if !ok {
+			continue
+		}
+		domestic := strings.TrimSpace(entry.Domestic)
+		global := strings.TrimSpace(entry.Global)
+		if domestic == "" && global == "" {
+			continue
+		}
+		locationKey := locationCacheKey(domestic, global)
+		locationID, err := getOrCreateDimID(
+			cache.location,
+			dims.insertLocation,
+			dims.selectLocation,
+			locationKey,
+			domestic,
+			global,
+		)
+		if err != nil {
+			return err
+		}
+		if _, err := updateLogsStmt.Exec(locationID, ipID, pendingID); err != nil {
+			return err
+		}
+		if updateSessionsStmt != nil {
+			if _, err := updateSessionsStmt.Exec(locationID, ipID, pendingID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 type sqlExecer interface {
@@ -471,23 +917,31 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 	uaTable := fmt.Sprintf("%s_dim_ua", websiteID)
 	locationTable := fmt.Sprintf("%s_dim_location", websiteID)
 
-	insertIP, err := tx.Prepare(fmt.Sprintf(`INSERT OR IGNORE INTO "%s" (ip) VALUES (?)`, ipTable))
+	insertIP, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`INSERT INTO "%s" (ip) VALUES (?) ON CONFLICT DO NOTHING`, ipTable),
+	))
 	if err != nil {
 		return nil, err
 	}
-	selectIP, err := tx.Prepare(fmt.Sprintf(`SELECT id FROM "%s" WHERE ip = ?`, ipTable))
+	selectIP, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`SELECT id FROM "%s" WHERE ip = ?`, ipTable),
+	))
 	if err != nil {
 		insertIP.Close()
 		return nil, err
 	}
 
-	insertURL, err := tx.Prepare(fmt.Sprintf(`INSERT OR IGNORE INTO "%s" (url) VALUES (?)`, urlTable))
+	insertURL, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`INSERT INTO "%s" (url) VALUES (?) ON CONFLICT DO NOTHING`, urlTable),
+	))
 	if err != nil {
 		selectIP.Close()
 		insertIP.Close()
 		return nil, err
 	}
-	selectURL, err := tx.Prepare(fmt.Sprintf(`SELECT id FROM "%s" WHERE url = ?`, urlTable))
+	selectURL, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`SELECT id FROM "%s" WHERE url = ?`, urlTable),
+	))
 	if err != nil {
 		insertURL.Close()
 		selectIP.Close()
@@ -495,7 +949,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		return nil, err
 	}
 
-	insertReferer, err := tx.Prepare(fmt.Sprintf(`INSERT OR IGNORE INTO "%s" (referer) VALUES (?)`, refererTable))
+	insertReferer, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`INSERT INTO "%s" (referer) VALUES (?) ON CONFLICT DO NOTHING`, refererTable),
+	))
 	if err != nil {
 		selectURL.Close()
 		insertURL.Close()
@@ -503,7 +959,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		insertIP.Close()
 		return nil, err
 	}
-	selectReferer, err := tx.Prepare(fmt.Sprintf(`SELECT id FROM "%s" WHERE referer = ?`, refererTable))
+	selectReferer, err := tx.Prepare(sqlutil.ReplacePlaceholders(
+		fmt.Sprintf(`SELECT id FROM "%s" WHERE referer = ?`, refererTable),
+	))
 	if err != nil {
 		insertReferer.Close()
 		selectURL.Close()
@@ -513,9 +971,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		return nil, err
 	}
 
-	insertUA, err := tx.Prepare(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (browser, os, device) VALUES (?, ?, ?)`, uaTable,
-	))
+	insertUA, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (browser, os, device) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, uaTable,
+	)))
 	if err != nil {
 		selectReferer.Close()
 		insertReferer.Close()
@@ -525,9 +983,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		insertIP.Close()
 		return nil, err
 	}
-	selectUA, err := tx.Prepare(fmt.Sprintf(
+	selectUA, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT id FROM "%s" WHERE browser = ? AND os = ? AND device = ?`, uaTable,
-	))
+	)))
 	if err != nil {
 		insertUA.Close()
 		selectReferer.Close()
@@ -539,9 +997,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		return nil, err
 	}
 
-	insertLocation, err := tx.Prepare(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (domestic, global) VALUES (?, ?)`, locationTable,
-	))
+	insertLocation, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (domestic, global) VALUES (?, ?) ON CONFLICT DO NOTHING`, locationTable,
+	)))
 	if err != nil {
 		selectUA.Close()
 		insertUA.Close()
@@ -553,9 +1011,9 @@ func prepareDimStatements(tx *sql.Tx, websiteID string) (*dimStatements, error) 
 		insertIP.Close()
 		return nil, err
 	}
-	selectLocation, err := tx.Prepare(fmt.Sprintf(
+	selectLocation, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT id FROM "%s" WHERE domestic = ? AND global = ?`, locationTable,
-	))
+	)))
 	if err != nil {
 		insertLocation.Close()
 		selectUA.Close()
@@ -589,51 +1047,51 @@ func prepareAggStatements(tx *sql.Tx, websiteID string) (*aggStatements, error) 
 	hourlyIPTable := fmt.Sprintf("%s_agg_hourly_ip", websiteID)
 	dailyIPTable := fmt.Sprintf("%s_agg_daily_ip", websiteID)
 
-	upsertHourly, err := tx.Prepare(fmt.Sprintf(
+	upsertHourly, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (bucket, pv, traffic, s2xx, s3xx, s4xx, s5xx, other)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket) DO UPDATE SET
-             pv = pv + excluded.pv,
-             traffic = traffic + excluded.traffic,
-             s2xx = s2xx + excluded.s2xx,
-             s3xx = s3xx + excluded.s3xx,
-             s4xx = s4xx + excluded.s4xx,
-             s5xx = s5xx + excluded.s5xx,
-             other = other + excluded.other`, hourlyTable,
-	))
+             pv = "%s".pv + excluded.pv,
+             traffic = "%s".traffic + excluded.traffic,
+             s2xx = "%s".s2xx + excluded.s2xx,
+             s3xx = "%s".s3xx + excluded.s3xx,
+             s4xx = "%s".s4xx + excluded.s4xx,
+             s5xx = "%s".s5xx + excluded.s5xx,
+             other = "%s".other + excluded.other`, hourlyTable, hourlyTable, hourlyTable, hourlyTable, hourlyTable, hourlyTable, hourlyTable, hourlyTable,
+	)))
 	if err != nil {
 		return nil, err
 	}
 
-	upsertDaily, err := tx.Prepare(fmt.Sprintf(
+	upsertDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, pv, traffic, s2xx, s3xx, s4xx, s5xx, other)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(day) DO UPDATE SET
-             pv = pv + excluded.pv,
-             traffic = traffic + excluded.traffic,
-             s2xx = s2xx + excluded.s2xx,
-             s3xx = s3xx + excluded.s3xx,
-             s4xx = s4xx + excluded.s4xx,
-             s5xx = s5xx + excluded.s5xx,
-             other = other + excluded.other`, dailyTable,
-	))
+             pv = "%s".pv + excluded.pv,
+             traffic = "%s".traffic + excluded.traffic,
+             s2xx = "%s".s2xx + excluded.s2xx,
+             s3xx = "%s".s3xx + excluded.s3xx,
+             s4xx = "%s".s4xx + excluded.s4xx,
+             s5xx = "%s".s5xx + excluded.s5xx,
+             other = "%s".other + excluded.other`, dailyTable, dailyTable, dailyTable, dailyTable, dailyTable, dailyTable, dailyTable, dailyTable,
+	)))
 	if err != nil {
 		upsertHourly.Close()
 		return nil, err
 	}
 
-	insertHourlyIP, err := tx.Prepare(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (bucket, ip_id) VALUES (?, ?)`, hourlyIPTable,
-	))
+	insertHourlyIP, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (bucket, ip_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, hourlyIPTable,
+	)))
 	if err != nil {
 		upsertDaily.Close()
 		upsertHourly.Close()
 		return nil, err
 	}
 
-	insertDailyIP, err := tx.Prepare(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (day, ip_id) VALUES (?, ?)`, dailyIPTable,
-	))
+	insertDailyIP, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (day, ip_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, dailyIPTable,
+	)))
 	if err != nil {
 		insertHourlyIP.Close()
 		upsertDaily.Close()
@@ -651,15 +1109,15 @@ func prepareAggStatements(tx *sql.Tx, websiteID string) (*aggStatements, error) 
 
 func prepareFirstSeenStatement(tx *sql.Tx, websiteID string) (*sql.Stmt, error) {
 	table := fmt.Sprintf("%s_first_seen", websiteID)
-	return tx.Prepare(fmt.Sprintf(
+	return tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (ip_id, first_ts)
          VALUES (?, ?)
-         ON CONFLICT(ip_id) DO UPDATE SET
+         ON CONFLICT (ip_id) DO UPDATE SET
              first_ts = CASE
-                 WHEN excluded.first_ts < first_ts THEN excluded.first_ts
-                 ELSE first_ts
-             END`, table,
-	))
+                 WHEN excluded.first_ts < "%s".first_ts THEN excluded.first_ts
+                 ELSE "%s".first_ts
+             END`, table, table, table,
+	)))
 }
 
 func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements, error) {
@@ -668,38 +1126,39 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 	dailyTable := fmt.Sprintf("%s_agg_session_daily", websiteID)
 	entryTable := fmt.Sprintf("%s_agg_entry_daily", websiteID)
 
-	selectState, err := tx.Prepare(fmt.Sprintf(
+	selectState, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`SELECT session_id, last_ts FROM "%s" WHERE ip_id = ? AND ua_id = ?`, stateTable,
-	))
+	)))
 	if err != nil {
 		return nil, err
 	}
 
-	upsertState, err := tx.Prepare(fmt.Sprintf(
+	upsertState, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (ip_id, ua_id, session_id, last_ts)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT(ip_id, ua_id) DO UPDATE SET
+         ON CONFLICT (ip_id, ua_id) DO UPDATE SET
              session_id = excluded.session_id,
              last_ts = excluded.last_ts`, stateTable,
-	))
+	)))
 	if err != nil {
 		selectState.Close()
 		return nil, err
 	}
 
-	insertSession, err := tx.Prepare(fmt.Sprintf(
+	insertSession, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (ip_id, ua_id, location_id, start_ts, end_ts, entry_url_id, exit_url_id, page_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, sessionTable,
-	))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING id`, sessionTable,
+	)))
 	if err != nil {
 		upsertState.Close()
 		selectState.Close()
 		return nil, err
 	}
 
-	updateSession, err := tx.Prepare(fmt.Sprintf(
+	updateSession, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`UPDATE "%s" SET end_ts = ?, exit_url_id = ?, page_count = page_count + 1 WHERE id = ?`, sessionTable,
-	))
+	)))
 	if err != nil {
 		insertSession.Close()
 		upsertState.Close()
@@ -707,12 +1166,12 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 		return nil, err
 	}
 
-	upsertDaily, err := tx.Prepare(fmt.Sprintf(
+	upsertDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, sessions)
          VALUES (?, 1)
-         ON CONFLICT(day) DO UPDATE SET
-             sessions = sessions + 1`, dailyTable,
-	))
+         ON CONFLICT (day) DO UPDATE SET
+             sessions = "%s".sessions + 1`, dailyTable, dailyTable,
+	)))
 	if err != nil {
 		updateSession.Close()
 		insertSession.Close()
@@ -721,12 +1180,12 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 		return nil, err
 	}
 
-	upsertEntryDaily, err := tx.Prepare(fmt.Sprintf(
+	upsertEntryDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, entry_url_id, count)
          VALUES (?, ?, 1)
-         ON CONFLICT(day, entry_url_id) DO UPDATE SET
-             count = count + 1`, entryTable,
-	))
+         ON CONFLICT (day, entry_url_id) DO UPDATE SET
+             count = "%s".count + 1`, entryTable, entryTable,
+	)))
 	if err != nil {
 		upsertDaily.Close()
 		updateSession.Close()
@@ -835,6 +1294,59 @@ func locationCacheKey(domestic, global string) string {
 	return domestic + "\x1f" + global
 }
 
+func fetchIPIDs(tx *sql.Tx, websiteID string, ips []string) (map[string]int64, error) {
+	results := make(map[string]int64)
+	if len(ips) == 0 {
+		return results, nil
+	}
+
+	unique := make([]string, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
+	for _, raw := range ips {
+		ip := strings.TrimSpace(raw)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+	if len(unique) == 0 {
+		return results, nil
+	}
+
+	placeholders := make([]string, len(unique))
+	args := make([]interface{}, len(unique))
+	for i, ip := range unique {
+		placeholders[i] = "?"
+		args[i] = ip
+	}
+
+	query := fmt.Sprintf(`SELECT id, ip FROM "%s_dim_ip" WHERE ip IN (%s)`, websiteID, strings.Join(placeholders, ","))
+	rows, err := tx.Query(sqlutil.ReplacePlaceholders(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id int64
+			ip string
+		)
+		if err := rows.Scan(&id, &ip); err != nil {
+			return nil, err
+		}
+		results[ip] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func (b *aggBatch) add(log NginxLogRecord, ipID int64) {
 	if b == nil {
 		return
@@ -917,7 +1429,8 @@ func updateSessionFromLog(
 	}
 
 	if state.sessionID == 0 || timestamp-state.lastTs > sessionGapSeconds {
-		result, err := stmts.insertSession.Exec(
+		var sessionID int64
+		if err := stmts.insertSession.QueryRow(
 			ipID,
 			uaID,
 			locationID,
@@ -926,12 +1439,7 @@ func updateSessionFromLog(
 			urlID,
 			urlID,
 			1,
-		)
-		if err != nil {
-			return err
-		}
-		sessionID, err := result.LastInsertId()
-		if err != nil {
+		).Scan(&sessionID); err != nil {
 			return err
 		}
 		day := dayBucket(time.Unix(timestamp, 0))
@@ -1204,33 +1712,35 @@ func (r *Repository) migrateLegacyLogs(websiteID string) error {
 	}
 
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s_dim_ip"(ip) SELECT DISTINCT ip FROM "%s"`,
+		`INSERT INTO "%s_dim_ip"(ip) SELECT DISTINCT ip FROM "%s" ON CONFLICT DO NOTHING`,
 		websiteID, logTable,
 	)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s_dim_url"(url) SELECT DISTINCT url FROM "%s"`,
+		`INSERT INTO "%s_dim_url"(url) SELECT DISTINCT url FROM "%s" ON CONFLICT DO NOTHING`,
 		websiteID, logTable,
 	)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s_dim_referer"(referer) SELECT DISTINCT referer FROM "%s"`,
+		`INSERT INTO "%s_dim_referer"(referer) SELECT DISTINCT referer FROM "%s" ON CONFLICT DO NOTHING`,
 		websiteID, logTable,
 	)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s_dim_ua"(browser, os, device)
-         SELECT DISTINCT user_browser, user_os, user_device FROM "%s"`,
+		`INSERT INTO "%s_dim_ua"(browser, os, device)
+         SELECT DISTINCT user_browser, user_os, user_device FROM "%s"
+         ON CONFLICT DO NOTHING`,
 		websiteID, logTable,
 	)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s_dim_location"(domestic, global)
-         SELECT DISTINCT domestic_location, global_location FROM "%s"`,
+		`INSERT INTO "%s_dim_location"(domestic, global)
+         SELECT DISTINCT domestic_location, global_location FROM "%s"
+         ON CONFLICT DO NOTHING`,
 		websiteID, logTable,
 	)); err != nil {
 		return err
@@ -1291,11 +1801,16 @@ func (r *Repository) migrateLegacyLogs(websiteID string) error {
 }
 
 func (r *Repository) tableExists(tableName string) (bool, error) {
-	row := r.db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, tableName,
-	)
-	var name string
-	if err := row.Scan(&name); err != nil {
+	row := r.db.QueryRow(sqlutil.ReplacePlaceholders(
+		`SELECT 1
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind IN ('r', 'p')
+           AND c.relname = ?`,
+	), tableName)
+	var exists int
+	if err := row.Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -1321,27 +1836,19 @@ func (r *Repository) tableHasRows(tableName string) (bool, error) {
 }
 
 func (r *Repository) tableHasColumn(tableName, columnName string) (bool, error) {
-	rows, err := r.db.Query(fmt.Sprintf(`PRAGMA table_info("%s")`, tableName))
+	rows, err := r.db.Query(sqlutil.ReplacePlaceholders(
+		`SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = ? AND column_name = ?
+         LIMIT 1`,
+	), tableName, columnName)
 	if err != nil {
 		return false, err
 	}
 	defer rows.Close()
 
-	for rows.Next() {
-		var (
-			cid       int
-			name      string
-			colType   string
-			notnull   int
-			dfltValue sql.NullString
-			pk        int
-		)
-		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
-			return false, err
-		}
-		if name == columnName {
-			return true, nil
-		}
+	if rows.Next() {
+		return true, nil
 	}
 	if err := rows.Err(); err != nil {
 		return false, err
@@ -1353,25 +1860,25 @@ func createDimTables(execer sqlExecer, websiteID string) error {
 	stmts := []string{
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_dim_ip" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 ip TEXT NOT NULL UNIQUE
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_dim_url" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 url TEXT NOT NULL UNIQUE
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_dim_referer" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 referer TEXT NOT NULL UNIQUE
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_dim_ua" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 browser TEXT NOT NULL,
                 os TEXT NOT NULL,
                 device TEXT NOT NULL,
@@ -1380,7 +1887,7 @@ func createDimTables(execer sqlExecer, websiteID string) error {
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_dim_location" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 domestic TEXT NOT NULL,
                 global TEXT NOT NULL,
                 UNIQUE(domestic, global)
@@ -1399,20 +1906,29 @@ func createDimTables(execer sqlExecer, websiteID string) error {
 func createLogTable(execer sqlExecer, tableName string) error {
 	stmt := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS "%s" (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_id INTEGER NOT NULL,
-            pageview_flag INTEGER NOT NULL DEFAULT 0,
-            timestamp INTEGER NOT NULL,
+            id BIGSERIAL NOT NULL,
+            ip_id BIGINT NOT NULL,
+            pageview_flag SMALLINT NOT NULL DEFAULT 0,
+            timestamp BIGINT NOT NULL,
             method TEXT NOT NULL,
-            url_id INTEGER NOT NULL,
-            status_code INTEGER NOT NULL,
-            bytes_sent INTEGER NOT NULL,
-            referer_id INTEGER NOT NULL,
-            ua_id INTEGER NOT NULL,
-            location_id INTEGER NOT NULL
-        )`, tableName,
+            url_id BIGINT NOT NULL,
+            status_code INT NOT NULL,
+            bytes_sent BIGINT NOT NULL,
+            referer_id BIGINT NOT NULL,
+            ua_id BIGINT NOT NULL,
+            location_id BIGINT NOT NULL,
+            PRIMARY KEY (id, timestamp)
+        ) PARTITION BY RANGE (timestamp)`, tableName,
 	)
 	_, err := execer.Exec(stmt)
+	if err != nil {
+		return err
+	}
+	partition := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS "%s_default" PARTITION OF "%s" DEFAULT`,
+		tableName, tableName,
+	)
+	_, err = execer.Exec(partition)
 	return err
 }
 
@@ -1424,11 +1940,11 @@ func createLogIndexes(execer sqlExecer, websiteID string) error {
 			websiteID, tableName,
 		),
 		fmt.Sprintf(
-			`CREATE INDEX IF NOT EXISTS idx_%s_pv_ts_ip ON "%s"(pageview_flag, timestamp, ip_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_%s_pv_ts_ip ON "%s"(timestamp, ip_id) WHERE pageview_flag = 1`,
 			websiteID, tableName,
 		),
 		fmt.Sprintf(
-			`CREATE INDEX IF NOT EXISTS idx_%s_session_key ON "%s"(pageview_flag, ip_id, ua_id, timestamp)`,
+			`CREATE INDEX IF NOT EXISTS idx_%s_session_key ON "%s"(ip_id, ua_id, timestamp) WHERE pageview_flag = 1`,
 			websiteID, tableName,
 		),
 	}
@@ -1444,39 +1960,39 @@ func createAggTables(execer sqlExecer, websiteID string) error {
 	stmts := []string{
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_hourly" (
-                bucket INTEGER PRIMARY KEY,
-                pv INTEGER NOT NULL DEFAULT 0,
-                traffic INTEGER NOT NULL DEFAULT 0,
-                s2xx INTEGER NOT NULL DEFAULT 0,
-                s3xx INTEGER NOT NULL DEFAULT 0,
-                s4xx INTEGER NOT NULL DEFAULT 0,
-                s5xx INTEGER NOT NULL DEFAULT 0,
-                other INTEGER NOT NULL DEFAULT 0
+                bucket BIGINT PRIMARY KEY,
+                pv BIGINT NOT NULL DEFAULT 0,
+                traffic BIGINT NOT NULL DEFAULT 0,
+                s2xx BIGINT NOT NULL DEFAULT 0,
+                s3xx BIGINT NOT NULL DEFAULT 0,
+                s4xx BIGINT NOT NULL DEFAULT 0,
+                s5xx BIGINT NOT NULL DEFAULT 0,
+                other BIGINT NOT NULL DEFAULT 0
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_hourly_ip" (
-                bucket INTEGER NOT NULL,
-                ip_id INTEGER NOT NULL,
+                bucket BIGINT NOT NULL,
+                ip_id BIGINT NOT NULL,
                 PRIMARY KEY(bucket, ip_id)
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_daily" (
-                day TEXT PRIMARY KEY,
-                pv INTEGER NOT NULL DEFAULT 0,
-                traffic INTEGER NOT NULL DEFAULT 0,
-                s2xx INTEGER NOT NULL DEFAULT 0,
-                s3xx INTEGER NOT NULL DEFAULT 0,
-                s4xx INTEGER NOT NULL DEFAULT 0,
-                s5xx INTEGER NOT NULL DEFAULT 0,
-                other INTEGER NOT NULL DEFAULT 0
+                day DATE PRIMARY KEY,
+                pv BIGINT NOT NULL DEFAULT 0,
+                traffic BIGINT NOT NULL DEFAULT 0,
+                s2xx BIGINT NOT NULL DEFAULT 0,
+                s3xx BIGINT NOT NULL DEFAULT 0,
+                s4xx BIGINT NOT NULL DEFAULT 0,
+                s5xx BIGINT NOT NULL DEFAULT 0,
+                other BIGINT NOT NULL DEFAULT 0
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_daily_ip" (
-                day TEXT NOT NULL,
-                ip_id INTEGER NOT NULL,
+                day DATE NOT NULL,
+                ip_id BIGINT NOT NULL,
                 PRIMARY KEY(day, ip_id)
             )`, websiteID,
 		),
@@ -1493,8 +2009,8 @@ func createAggTables(execer sqlExecer, websiteID string) error {
 func createFirstSeenTable(execer sqlExecer, websiteID string) error {
 	stmt := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS "%s_first_seen" (
-            ip_id INTEGER PRIMARY KEY,
-            first_ts INTEGER NOT NULL
+            ip_id BIGINT PRIMARY KEY,
+            first_ts BIGINT NOT NULL
         )`, websiteID,
 	)
 	_, err := execer.Exec(stmt)
@@ -1505,15 +2021,15 @@ func createSessionTables(execer sqlExecer, websiteID string) error {
 	stmts := []string{
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_sessions" (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip_id INTEGER NOT NULL,
-                ua_id INTEGER NOT NULL,
-                location_id INTEGER NOT NULL,
-                start_ts INTEGER NOT NULL,
-                end_ts INTEGER NOT NULL,
-                entry_url_id INTEGER NOT NULL,
-                exit_url_id INTEGER NOT NULL,
-                page_count INTEGER NOT NULL DEFAULT 1
+                id BIGSERIAL PRIMARY KEY,
+                ip_id BIGINT NOT NULL,
+                ua_id BIGINT NOT NULL,
+                location_id BIGINT NOT NULL,
+                start_ts BIGINT NOT NULL,
+                end_ts BIGINT NOT NULL,
+                entry_url_id BIGINT NOT NULL,
+                exit_url_id BIGINT NOT NULL,
+                page_count INT NOT NULL DEFAULT 1
             )`, websiteID,
 		),
 		fmt.Sprintf(
@@ -1526,10 +2042,10 @@ func createSessionTables(execer sqlExecer, websiteID string) error {
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_session_state" (
-                ip_id INTEGER NOT NULL,
-                ua_id INTEGER NOT NULL,
-                session_id INTEGER NOT NULL,
-                last_ts INTEGER NOT NULL,
+                ip_id BIGINT NOT NULL,
+                ua_id BIGINT NOT NULL,
+                session_id BIGINT NOT NULL,
+                last_ts BIGINT NOT NULL,
                 PRIMARY KEY(ip_id, ua_id)
             )`, websiteID,
 		),
@@ -1546,15 +2062,15 @@ func createSessionAggTables(execer sqlExecer, websiteID string) error {
 	stmts := []string{
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_session_daily" (
-                day TEXT PRIMARY KEY,
-                sessions INTEGER NOT NULL DEFAULT 0
+                day DATE PRIMARY KEY,
+                sessions BIGINT NOT NULL DEFAULT 0
             )`, websiteID,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS "%s_agg_entry_daily" (
-                day TEXT NOT NULL,
-                entry_url_id INTEGER NOT NULL,
-                count INTEGER NOT NULL DEFAULT 0,
+                day DATE NOT NULL,
+                entry_url_id BIGINT NOT NULL,
+                count BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY(day, entry_url_id)
             )`, websiteID,
 		),
@@ -1700,13 +2216,14 @@ func (r *Repository) backfillAggregates(websiteID string) error {
 	}
 
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (bucket, ip_id)
+		`INSERT INTO "%s" (bucket, ip_id)
          SELECT
              (timestamp / 3600) * 3600 AS bucket,
              ip_id
          FROM "%s"
          WHERE pageview_flag = 1
-         GROUP BY bucket, ip_id`, aggHourlyIP, logTable,
+         GROUP BY bucket, ip_id
+         ON CONFLICT DO NOTHING`, aggHourlyIP, logTable,
 	)); err != nil {
 		return err
 	}
@@ -1714,7 +2231,7 @@ func (r *Repository) backfillAggregates(websiteID string) error {
 	if _, err = tx.Exec(fmt.Sprintf(
 		`INSERT INTO "%s" (day, pv, traffic, s2xx, s3xx, s4xx, s5xx, other)
          SELECT
-             strftime('%%Y-%%m-%%d', timestamp, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(timestamp)) AS day,
              SUM(CASE WHEN pageview_flag = 1 THEN 1 ELSE 0 END) AS pv,
              SUM(CASE WHEN pageview_flag = 1 THEN bytes_sent ELSE 0 END) AS traffic,
              SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS s2xx,
@@ -1729,13 +2246,14 @@ func (r *Repository) backfillAggregates(websiteID string) error {
 	}
 
 	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (day, ip_id)
+		`INSERT INTO "%s" (day, ip_id)
          SELECT
-             strftime('%%Y-%%m-%%d', timestamp, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(timestamp)) AS day,
              ip_id
          FROM "%s"
          WHERE pageview_flag = 1
-         GROUP BY day, ip_id`, aggDailyIP, logTable,
+         GROUP BY day, ip_id
+         ON CONFLICT DO NOTHING`, aggDailyIP, logTable,
 	)); err != nil {
 		return err
 	}
@@ -1908,7 +2426,7 @@ func (r *Repository) backfillSessionAggregates(websiteID string) error {
 	if _, err = tx.Exec(fmt.Sprintf(
 		`INSERT INTO "%s" (day, sessions)
          SELECT
-             strftime('%%Y-%%m-%%d', start_ts, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(start_ts)) AS day,
              COUNT(*)
          FROM "%s"
          GROUP BY day`, dailyTable, sessionTable,
@@ -1919,11 +2437,11 @@ func (r *Repository) backfillSessionAggregates(websiteID string) error {
 	if _, err = tx.Exec(fmt.Sprintf(
 		`INSERT INTO "%s" (day, entry_url_id, count)
          SELECT
-             strftime('%%Y-%%m-%%d', start_ts, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(start_ts)) AS day,
              entry_url_id,
              COUNT(*)
-         FROM "%s"
-         GROUP BY day, entry_url_id`, entryTable, sessionTable,
+        FROM "%s"
+        GROUP BY day, entry_url_id`, entryTable, sessionTable,
 	)); err != nil {
 		return err
 	}
@@ -1950,16 +2468,28 @@ func (r *Repository) cleanupAggregates(websiteID string, cutoff time.Time) error
 	cutoffHour := hourBucket(cutoff)
 	cutoffDay := dayBucket(cutoff)
 
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket < ?`, aggHourly), cutoffHour); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket < ?`, aggHourly)),
+		cutoffHour,
+	); err != nil {
 		return err
 	}
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket < ?`, aggHourlyIP), cutoffHour); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket < ?`, aggHourlyIP)),
+		cutoffHour,
+	); err != nil {
 		return err
 	}
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, aggDaily), cutoffDay); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, aggDaily)),
+		cutoffDay,
+	); err != nil {
 		return err
 	}
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, aggDailyIP), cutoffDay); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, aggDailyIP)),
+		cutoffDay,
+	); err != nil {
 		return err
 	}
 
@@ -1981,7 +2511,10 @@ func (r *Repository) cleanupSessions(websiteID string, cutoff time.Time) error {
 		return err
 	}
 
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE start_ts < ?`, sessionTable), cutoff.Unix()); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE start_ts < ?`, sessionTable)),
+		cutoff.Unix(),
+	); err != nil {
 		return err
 	}
 
@@ -2020,7 +2553,10 @@ func (r *Repository) cleanupSessionAggregates(websiteID string, cutoff time.Time
 
 	cutoffDay := dayBucket(cutoff)
 
-	if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, dailyTable), cutoffDay); err != nil {
+	if _, err := r.db.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, dailyTable)),
+		cutoffDay,
+	); err != nil {
 		return err
 	}
 
@@ -2029,7 +2565,10 @@ func (r *Repository) cleanupSessionAggregates(websiteID string, cutoff time.Time
 		return err
 	}
 	if hasEntry {
-		if _, err := r.db.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, entryTable), cutoffDay); err != nil {
+		if _, err := r.db.Exec(
+			sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day < ?`, entryTable)),
+			cutoffDay,
+		); err != nil {
 			return err
 		}
 	}
@@ -2058,17 +2597,20 @@ func (r *Repository) rebuildSessionAggregatesForDay(websiteID, day string) error
 		}
 	}()
 
-	if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, dailyTable), day); err != nil {
+	if _, err = tx.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, dailyTable)),
+		day,
+	); err != nil {
 		return err
 	}
 
-	if _, err = tx.Exec(fmt.Sprintf(
+	if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, sessions)
          SELECT ?, COUNT(*)
          FROM "%s"
          WHERE start_ts >= ? AND start_ts < ?
          HAVING COUNT(*) > 0`, dailyTable, sessionTable,
-	), day, start.Unix(), end.Unix()); err != nil {
+	)), day, start.Unix(), end.Unix()); err != nil {
 		return err
 	}
 
@@ -2077,16 +2619,19 @@ func (r *Repository) rebuildSessionAggregatesForDay(websiteID, day string) error
 		return err
 	}
 	if hasEntry {
-		if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, entryTable), day); err != nil {
+		if _, err = tx.Exec(
+			sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, entryTable)),
+			day,
+		); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(fmt.Sprintf(
+		if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 			`INSERT INTO "%s" (day, entry_url_id, count)
              SELECT ?, entry_url_id, COUNT(*)
              FROM "%s"
              WHERE start_ts >= ? AND start_ts < ?
              GROUP BY entry_url_id`, entryTable, sessionTable,
-		), day, start.Unix(), end.Unix()); err != nil {
+		)), day, start.Unix(), end.Unix()); err != nil {
 			return err
 		}
 	}
@@ -2112,14 +2657,20 @@ func (r *Repository) rebuildHourlyAggregate(websiteID string, bucket int64) erro
 		}
 	}()
 
-	if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket = ?`, aggHourly), bucket); err != nil {
+	if _, err = tx.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket = ?`, aggHourly)),
+		bucket,
+	); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket = ?`, aggHourlyIP), bucket); err != nil {
+	if _, err = tx.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE bucket = ?`, aggHourlyIP)),
+		bucket,
+	); err != nil {
 		return err
 	}
 
-	if _, err = tx.Exec(fmt.Sprintf(
+	if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (bucket, pv, traffic, s2xx, s3xx, s4xx, s5xx, other)
          SELECT
              (timestamp / 3600) * 3600 AS bucket,
@@ -2133,19 +2684,20 @@ func (r *Repository) rebuildHourlyAggregate(websiteID string, bucket int64) erro
          FROM "%s"
          WHERE timestamp >= ? AND timestamp < ?
          GROUP BY bucket`, aggHourly, logTable,
-	), start, end); err != nil {
+	)), start, end); err != nil {
 		return err
 	}
 
-	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (bucket, ip_id)
+	if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (bucket, ip_id)
          SELECT
              (timestamp / 3600) * 3600 AS bucket,
              ip_id
          FROM "%s"
          WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?
-         GROUP BY bucket, ip_id`, aggHourlyIP, logTable,
-	), start, end); err != nil {
+         GROUP BY bucket, ip_id
+         ON CONFLICT DO NOTHING`, aggHourlyIP, logTable,
+	)), start, end); err != nil {
 		return err
 	}
 
@@ -2173,17 +2725,23 @@ func (r *Repository) rebuildDailyAggregate(websiteID string, day string) error {
 		}
 	}()
 
-	if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, aggDaily), day); err != nil {
+	if _, err = tx.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, aggDaily)),
+		day,
+	); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, aggDailyIP), day); err != nil {
+	if _, err = tx.Exec(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(`DELETE FROM "%s" WHERE day = ?`, aggDailyIP)),
+		day,
+	); err != nil {
 		return err
 	}
 
-	if _, err = tx.Exec(fmt.Sprintf(
+	if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, pv, traffic, s2xx, s3xx, s4xx, s5xx, other)
          SELECT
-             strftime('%%Y-%%m-%%d', timestamp, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(timestamp)) AS day,
              SUM(CASE WHEN pageview_flag = 1 THEN 1 ELSE 0 END) AS pv,
              SUM(CASE WHEN pageview_flag = 1 THEN bytes_sent ELSE 0 END) AS traffic,
              SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS s2xx,
@@ -2194,19 +2752,20 @@ func (r *Repository) rebuildDailyAggregate(websiteID string, day string) error {
          FROM "%s"
          WHERE timestamp >= ? AND timestamp < ?
          GROUP BY day`, aggDaily, logTable,
-	), start.Unix(), end.Unix()); err != nil {
+	)), start.Unix(), end.Unix()); err != nil {
 		return err
 	}
 
-	if _, err = tx.Exec(fmt.Sprintf(
-		`INSERT OR IGNORE INTO "%s" (day, ip_id)
+	if _, err = tx.Exec(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (day, ip_id)
          SELECT
-             strftime('%%Y-%%m-%%d', timestamp, 'unixepoch', 'localtime') AS day,
+             date(to_timestamp(timestamp)) AS day,
              ip_id
          FROM "%s"
          WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?
-         GROUP BY day, ip_id`, aggDailyIP, logTable,
-	), start.Unix(), end.Unix()); err != nil {
+         GROUP BY day, ip_id
+         ON CONFLICT DO NOTHING`, aggDailyIP, logTable,
+	)), start.Unix(), end.Unix()); err != nil {
 		return err
 	}
 

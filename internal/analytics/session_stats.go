@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 )
@@ -112,12 +113,12 @@ func (m *SessionsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	queryBuilder.WriteString(fmt.Sprintf(`
         SELECT l.timestamp, l.ip_id, l.ua_id, ip.ip, ua.browser, ua.os, ua.device,
                u.url, loc.domestic, loc.global
-        FROM "%s_nginx_logs" l INDEXED BY idx_%s_session_key
+        FROM "%s_nginx_logs" l
         JOIN "%s_dim_ip" ip ON ip.id = l.ip_id
         JOIN "%s_dim_ua" ua ON ua.id = l.ua_id
         JOIN "%s_dim_url" u ON u.id = l.url_id
         JOIN "%s_dim_location" loc ON loc.id = l.location_id`,
-		query.WebsiteID, query.WebsiteID, query.WebsiteID, query.WebsiteID, query.WebsiteID, query.WebsiteID))
+		query.WebsiteID, query.WebsiteID, query.WebsiteID, query.WebsiteID, query.WebsiteID))
 
 	conditions := make([]string, 0, 4)
 	args := make([]interface{}, 0, 6)
@@ -163,7 +164,8 @@ func (m *SessionsStatsManager) Query(query StatsQuery) (StatsResult, error) {
 
 	queryBuilder.WriteString(" ORDER BY l.ip_id, l.ua_id, l.timestamp")
 
-	rows, err := m.repo.GetDB().Query(queryBuilder.String(), args...)
+	queryStr := sqlutil.ReplacePlaceholders(queryBuilder.String())
+	rows, err := m.repo.GetDB().Query(queryStr, args...)
 	if err != nil {
 		return result, fmt.Errorf("查询会话日志失败: %v", err)
 	}

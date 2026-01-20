@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,13 +16,15 @@ var (
 )
 
 const (
-	DataDir    = "./var/nginxpulse_data"
-	ConfigFile = "./configs/nginxpulse_config.json"
+	DataDir            = "./var/nginxpulse_data"
+	ConfigFile         = "./configs/nginxpulse_config.json"
+	DefaultIPGeoAPIURL = "http://ip-api.com/batch"
 )
 
 type Config struct {
 	System   SystemConfig    `json:"system"`
 	Server   ServerConfig    `json:"server"`
+	Database DatabaseConfig  `json:"database"`
 	Websites []WebsiteConfig `json:"websites"`
 	PVFilter PVFilterConfig  `json:"pvFilter"`
 }
@@ -85,6 +88,9 @@ type SystemConfig struct {
 	LogDestination   string   `json:"logDestination"`
 	TaskInterval     string   `json:"taskInterval"` // "5m" "25s"
 	LogRetentionDays int      `json:"logRetentionDays"`
+	ParseBatchSize   int      `json:"parseBatchSize"`
+	IPGeoCacheLimit  int      `json:"ipGeoCacheLimit"`
+	IPGeoAPIURL      string   `json:"ipGeoApiUrl"`
 	DemoMode         bool     `json:"demoMode"`
 	AccessKeys       []string `json:"accessKeys"`
 	Language         string   `json:"language"`
@@ -92,6 +98,14 @@ type SystemConfig struct {
 
 type ServerConfig struct {
 	Port string `json:"Port"`
+}
+
+type DatabaseConfig struct {
+	Driver          string `json:"driver"`
+	DSN             string `json:"dsn"`
+	MaxOpenConns    int    `json:"maxOpenConns"`
+	MaxIdleConns    int    `json:"maxIdleConns"`
+	ConnMaxLifetime string `json:"connMaxLifetime"`
 }
 
 type PVFilterConfig struct {
@@ -143,6 +157,15 @@ func GetAllWebsiteIDs() []string {
 		return true
 	})
 	return ids
+}
+
+func GetIPGeoAPIURL() string {
+	cfg := ReadConfig()
+	value := strings.TrimSpace(cfg.System.IPGeoAPIURL)
+	if value == "" {
+		return DefaultIPGeoAPIURL
+	}
+	return value
 }
 
 // ParseInterval 解析间隔配置字符串，支持分钟(m)和秒(s)单位

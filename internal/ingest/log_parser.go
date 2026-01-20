@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -40,9 +41,9 @@ const (
 )
 
 const (
-	recentLogWindowDays = 7
-	recentScanChunkSize = 256 * 1024
-	backfillBatchSize   = 100
+	recentLogWindowDays   = 7
+	recentScanChunkSize   = 256 * 1024
+	defaultParseBatchSize = 100
 )
 
 var (
@@ -143,13 +144,15 @@ type logLineParser struct {
 }
 
 type LogParser struct {
-	repo          *store.Repository
-	statePath     string
-	states        map[string]LogScanState // 各网站的扫描状态，以网站ID为键
-	demoMode      bool
-	retentionDays int
-	lineParsers   map[string]*logLineParser // key: websiteID or websiteID:sourceID
-	dedup         *dedup.Cache
+	repo            *store.Repository
+	statePath       string
+	states          map[string]LogScanState // 各网站的扫描状态，以网站ID为键
+	demoMode        bool
+	retentionDays   int
+	parseBatchSize  int
+	ipGeoCacheLimit int
+	lineParsers     map[string]*logLineParser // key: websiteID or websiteID:sourceID
+	dedup           *dedup.Cache
 }
 
 // NewLogParser 创建新的日志解析器
@@ -160,16 +163,27 @@ func NewLogParser(userRepoPtr *store.Repository) *LogParser {
 	if retentionDays <= 0 {
 		retentionDays = 30
 	}
+	parseBatchSize := cfg.System.ParseBatchSize
+	if parseBatchSize <= 0 {
+		parseBatchSize = defaultParseBatchSize
+	}
+	ipGeoCacheLimit := cfg.System.IPGeoCacheLimit
+	if ipGeoCacheLimit <= 0 {
+		ipGeoCacheLimit = 1000000
+	}
 	parser := &LogParser{
-		repo:          userRepoPtr,
-		statePath:     statePath,
-		states:        make(map[string]LogScanState),
-		demoMode:      cfg.System.DemoMode,
-		retentionDays: retentionDays,
-		lineParsers:   make(map[string]*logLineParser),
-		dedup:         dedup.NewCache(100000, 10*time.Minute),
+		repo:            userRepoPtr,
+		statePath:       statePath,
+		states:          make(map[string]LogScanState),
+		demoMode:        cfg.System.DemoMode,
+		retentionDays:   retentionDays,
+		parseBatchSize:  parseBatchSize,
+		ipGeoCacheLimit: ipGeoCacheLimit,
+		lineParsers:     make(map[string]*logLineParser),
+		dedup:           dedup.NewCache(100000, 10*time.Minute),
 	}
 	parser.loadState()
+	parser.resetStateIfEmptyDB()
 	enrich.InitPVFilters()
 	return parser
 }
@@ -198,6 +212,11 @@ func (p *LogParser) loadState() {
 		if state.Files == nil {
 			state.Files = make(map[string]FileState)
 		}
+		normalizedFiles := make(map[string]FileState, len(state.Files))
+		for path, fileState := range state.Files {
+			normalizedFiles[normalizeLogPath(path)] = fileState
+		}
+		state.Files = normalizedFiles
 		if state.Targets == nil {
 			state.Targets = make(map[string]TargetState)
 		}
@@ -217,9 +236,55 @@ func (p *LogParser) updateState() {
 		return
 	}
 
-	if err := os.WriteFile(p.statePath, data, 0644); err != nil {
+	tmpPath := p.statePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		logrus.Errorf("保存扫描状态失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, p.statePath); err != nil {
 		logrus.Errorf("保存扫描状态失败: %v", err)
 	}
+}
+
+func (p *LogParser) resetStateIfEmptyDB() {
+	if p.demoMode {
+		return
+	}
+
+	websiteIDs := config.GetAllWebsiteIDs()
+	if len(websiteIDs) == 0 {
+		return
+	}
+
+	hasState := false
+	for _, id := range websiteIDs {
+		state, ok := p.states[id]
+		if !ok {
+			continue
+		}
+		if len(state.Files) > 0 || len(state.Targets) > 0 || len(state.ParsedHourBuckets) > 0 ||
+			state.ParsedMaxTs > 0 || state.LogMaxTs > 0 {
+			hasState = true
+			break
+		}
+	}
+	if !hasState {
+		return
+	}
+
+	for _, id := range websiteIDs {
+		hasLogs, err := p.repo.HasLogs(id)
+		if err != nil {
+			logrus.WithError(err).Warnf("检测网站 %s 日志数据失败，跳过自动清理扫描状态", id)
+			return
+		}
+		if hasLogs {
+			return
+		}
+	}
+
+	logrus.Warn("检测到扫描状态已存在但数据库日志为空，自动清理扫描状态以便重新解析")
+	p.ResetScanState("")
 }
 
 func (p *LogParser) ensureWebsiteState(websiteID string) LogScanState {
@@ -247,13 +312,13 @@ func (p *LogParser) getFileState(websiteID, filePath string) (FileState, bool) {
 	if !ok || state.Files == nil {
 		return FileState{}, false
 	}
-	fileState, ok := state.Files[filePath]
+	fileState, ok := state.Files[normalizeLogPath(filePath)]
 	return fileState, ok
 }
 
 func (p *LogParser) setFileState(websiteID, filePath string, fileState FileState) {
 	state := p.ensureWebsiteState(websiteID)
-	state.Files[filePath] = fileState
+	state.Files[normalizeLogPath(filePath)] = fileState
 	p.states[websiteID] = state
 }
 
@@ -262,7 +327,7 @@ func (p *LogParser) deleteFileState(websiteID, filePath string) {
 	if !ok || state.Files == nil {
 		return
 	}
-	delete(state.Files, filePath)
+	delete(state.Files, normalizeLogPath(filePath))
 	p.states[websiteID] = state
 }
 
@@ -590,6 +655,7 @@ func (p *LogParser) scanNginxLogsInternal(websiteIDs []string) []ParserResult {
 		}
 
 		p.refreshWebsiteRanges(id)
+		p.updateState()
 		parserResult.Duration = time.Since(startTime)
 		parserResults[i] = parserResult
 	}
@@ -900,7 +966,8 @@ func (p *LogParser) determineStartOffset(
 		return 0
 	}
 
-	fileState, ok := state.Files[filePath]
+	normalizedPath := normalizeLogPath(filePath)
+	fileState, ok := state.Files[normalizedPath]
 	if !ok {
 		return 0
 	}
@@ -1093,7 +1160,7 @@ func (p *LogParser) parseLogLines(
 	parsedBuckets := make(map[int64]struct{})
 
 	// 批量插入相关
-	batch := make([]store.NginxLogRecord, 0, backfillBatchSize)
+	batch := make([]store.NginxLogRecord, 0, p.parseBatchSize)
 
 	// 处理一批数据
 	processBatch := func() {
@@ -1101,7 +1168,7 @@ func (p *LogParser) parseLogLines(
 			return
 		}
 
-		p.fillBatchLocations(batch)
+		p.queueBatchIPGeo(batch)
 
 		if err := p.repo.BatchInsertLogsForWebsite(websiteID, batch); err != nil {
 			logrus.Errorf("批量插入网站 %s 的日志记录失败: %v", websiteID, err)
@@ -1144,7 +1211,7 @@ func (p *LogParser) parseLogLines(
 		entriesCount++
 		parserResult.TotalEntries++ // 累加到总结果中，而非赋值
 
-		if len(batch) >= backfillBatchSize {
+		if len(batch) >= p.parseBatchSize {
 			processBatch()
 		}
 	}
@@ -1174,7 +1241,7 @@ func (p *LogParser) IngestLines(websiteID, sourceID string, lines []string) (int
 		return 0, 0, err
 	}
 
-	batch := make([]store.NginxLogRecord, 0, backfillBatchSize)
+	batch := make([]store.NginxLogRecord, 0, p.parseBatchSize)
 	accepted := 0
 	deduped := 0
 	var minTs int64
@@ -1185,7 +1252,7 @@ func (p *LogParser) IngestLines(websiteID, sourceID string, lines []string) (int
 		if len(batch) == 0 {
 			return nil
 		}
-		p.fillBatchLocations(batch)
+		p.queueBatchIPGeo(batch)
 		if err := p.repo.BatchInsertLogsForWebsite(websiteID, batch); err != nil {
 			return err
 		}
@@ -1215,7 +1282,7 @@ func (p *LogParser) IngestLines(websiteID, sourceID string, lines []string) (int
 			maxTs = ts
 		}
 
-		if len(batch) >= backfillBatchSize {
+		if len(batch) >= p.parseBatchSize {
 			if err := processBatch(); err != nil {
 				return accepted, deduped, err
 			}
@@ -1251,21 +1318,40 @@ func buildDedupKey(websiteID, sourceID, line string) string {
 	return fmt.Sprintf("%s:%s:%x", websiteID, sourceID, hash[:])
 }
 
-func (p *LogParser) fillBatchLocations(batch []store.NginxLogRecord) {
-	ips := make([]string, 0, len(batch))
-	for _, entry := range batch {
-		ips = append(ips, entry.IP)
+func (p *LogParser) queueBatchIPGeo(batch []store.NginxLogRecord) {
+	if len(batch) == 0 {
+		return
 	}
 
-	locations := enrich.GetIPLocationBatch(ips)
+	unique := make([]string, 0, len(batch))
+	seen := make(map[string]struct{}, len(batch))
+	for _, entry := range batch {
+		ip := strings.TrimSpace(entry.IP)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+
+	if p.repo != nil && len(unique) > 0 {
+		if err := p.repo.UpsertIPGeoPending(unique); err != nil {
+			logrus.WithError(err).Warn("写入 IP 归属地待解析队列失败")
+		}
+	}
+
 	for i := range batch {
-		if location, ok := locations[batch[i].IP]; ok {
-			batch[i].DomesticLocation = location.Domestic
-			batch[i].GlobalLocation = location.Global
-		} else {
+		ip := strings.TrimSpace(batch[i].IP)
+		if ip == "" {
 			batch[i].DomesticLocation = "未知"
 			batch[i].GlobalLocation = "未知"
+			continue
 		}
+		batch[i].DomesticLocation = pendingLocationLabel
+		batch[i].GlobalLocation = pendingLocationLabel
 	}
 }
 
@@ -1641,6 +1727,7 @@ func (p *LogParser) buildLogRecord(
 	ip, method, urlValue, referer, userAgent string,
 	statusCode, bytesSent int, timestamp time.Time) (*store.NginxLogRecord, error) {
 
+	ip = normalizeIP(ip)
 	if ip == "" || method == "" || urlValue == "" {
 		return nil, errors.New("日志缺少必要字段")
 	}
@@ -1688,6 +1775,43 @@ func (p *LogParser) buildLogRecord(
 		DomesticLocation: "",
 		GlobalLocation:   "",
 	}, nil
+}
+
+func normalizeIP(raw string) string {
+	ip := strings.TrimSpace(raw)
+	if ip == "" {
+		return ip
+	}
+	if strings.Contains(ip, ",") {
+		parts := strings.Split(ip, ",")
+		if len(parts) > 0 {
+			ip = strings.TrimSpace(parts[0])
+		}
+	}
+	if strings.HasPrefix(ip, "[") {
+		if end := strings.Index(ip, "]"); end > 0 {
+			ip = ip[1:end]
+		}
+		return ip
+	}
+	if strings.Count(ip, ":") == 1 && strings.Contains(ip, ".") {
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			return host
+		}
+	}
+	return ip
+}
+
+func normalizeLogPath(path string) string {
+	cleaned := strings.TrimSpace(path)
+	if cleaned == "" {
+		return cleaned
+	}
+	cleaned = filepath.Clean(cleaned)
+	if abs, err := filepath.Abs(cleaned); err == nil {
+		return abs
+	}
+	return cleaned
 }
 
 func getMap(source map[string]interface{}, key string) map[string]interface{} {

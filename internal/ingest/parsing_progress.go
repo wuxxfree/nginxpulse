@@ -79,3 +79,62 @@ func GetIPParsingProgress() int {
 	progress = math.Max(0, math.Min(progress, 1))
 	return int(math.Round(progress * 100))
 }
+
+func GetIPParsingEstimatedTotalSeconds() int64 {
+	parseProgressMu.RLock()
+	total := parseProgress.TotalBytes
+	processed := parseProgress.ProcessedBytes
+	startedAt := parseProgress.StartedAt
+	parseProgressMu.RUnlock()
+
+	if total <= 0 || processed <= 0 || startedAt.IsZero() {
+		return 0
+	}
+
+	elapsed := time.Since(startedAt).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+
+	rate := float64(processed) / elapsed
+	if rate <= 0 {
+		return 0
+	}
+
+	estimatedTotal := float64(total) / rate
+	if estimatedTotal <= 0 {
+		return 0
+	}
+
+	return int64(math.Ceil(estimatedTotal))
+}
+
+func GetIPParsingEstimatedRemainingSeconds() int64 {
+	parseProgressMu.RLock()
+	total := parseProgress.TotalBytes
+	processed := parseProgress.ProcessedBytes
+	startedAt := parseProgress.StartedAt
+	parseProgressMu.RUnlock()
+
+	if total <= 0 || processed <= 0 || startedAt.IsZero() {
+		return 0
+	}
+
+	elapsed := time.Since(startedAt).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+
+	rate := float64(processed) / elapsed
+	if rate <= 0 {
+		return 0
+	}
+
+	estimatedTotal := float64(total) / rate
+	remaining := estimatedTotal - elapsed
+	if remaining <= 0 {
+		return 0
+	}
+
+	return int64(math.Ceil(remaining))
+}

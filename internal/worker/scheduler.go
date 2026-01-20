@@ -90,6 +90,13 @@ func ExecutePeriodicTasks(parser *ingest.LogParser, interval time.Duration) {
 				float64(backfillResult.ProcessedBytes)/(1024*1024))
 		}
 	}
+
+	{ // 5 IP 归属地回填
+		processed := parser.ProcessPendingIPGeo(0)
+		if processed > 0 {
+			logrus.Infof("IP 归属地回填完成: %d 个 IP", processed)
+		}
+	}
 }
 
 func backfillBudget(interval time.Duration) (time.Duration, int64) {

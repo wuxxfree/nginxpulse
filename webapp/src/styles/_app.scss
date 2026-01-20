@@ -411,6 +411,16 @@ body.dark-mode .sidebar-footer {
     font-weight: 500;
 }
 
+.geo-pending-note {
+    margin: 0 20px 12px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: rgba(36, 128, 255, 0.08);
+    color: var(--accent-color);
+    font-size: 12px;
+    font-weight: 500;
+}
+
 .main-content.parsing-lock {
     overflow: hidden;
 }

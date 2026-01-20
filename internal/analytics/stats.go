@@ -286,6 +286,26 @@ func (f *StatsFactory) BuildQueryFromRequest(
 				return query, fmt.Errorf("excludeInternal 参数无效")
 			}
 		}
+		if excludeSpiderRaw, ok := params["excludeSpider"]; ok && excludeSpiderRaw != "" {
+			switch strings.ToLower(excludeSpiderRaw) {
+			case "true", "1":
+				query.ExtraParam["excludeSpider"] = true
+			case "false", "0":
+				query.ExtraParam["excludeSpider"] = false
+			default:
+				return query, fmt.Errorf("excludeSpider 参数无效")
+			}
+		}
+		if excludeForeignRaw, ok := params["excludeForeign"]; ok && excludeForeignRaw != "" {
+			switch strings.ToLower(excludeForeignRaw) {
+			case "true", "1":
+				query.ExtraParam["excludeForeign"] = true
+			case "false", "0":
+				query.ExtraParam["excludeForeign"] = false
+			default:
+				return query, fmt.Errorf("excludeForeign 参数无效")
+			}
+		}
 		if ipFilter, ok := params["ipFilter"]; ok && ipFilter != "" {
 			query.ExtraParam["ipFilter"] = ipFilter
 		}

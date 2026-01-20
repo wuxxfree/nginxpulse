@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/likaia/nginxpulse/internal/config"
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 )
@@ -97,11 +98,17 @@ func (s *ClientStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	selectExpr := statsType
 	groupExpr := statsType
 	if s.statsType == "location" && locationType == "domestic" {
-		selectExpr = fmt.Sprintf("CASE WHEN instr(loc.%[1]s, '·') > 0 THEN substr(loc.%[1]s, 1, instr(loc.%[1]s, '·') - 1) ELSE loc.%[1]s END", statsType)
+		selectExpr = fmt.Sprintf(
+			"CASE WHEN position('·' in loc.%[1]s) > 0 THEN substring(loc.%[1]s from 1 for position('·' in loc.%[1]s) - 1) ELSE loc.%[1]s END",
+			statsType,
+		)
 		groupExpr = selectExpr
 	}
 	if s.statsType == "location" && locationType == "city" {
-		selectExpr = fmt.Sprintf("CASE WHEN instr(loc.%[1]s, '·') > 0 THEN substr(loc.%[1]s, instr(loc.%[1]s, '·') + 1) ELSE loc.%[1]s END", statsType)
+		selectExpr = fmt.Sprintf(
+			"CASE WHEN position('·' in loc.%[1]s) > 0 THEN substring(loc.%[1]s from position('·' in loc.%[1]s) + 1) ELSE loc.%[1]s END",
+			statsType,
+		)
 		groupExpr = selectExpr
 	}
 	if s.statsType == "referer" {
@@ -161,18 +168,18 @@ func (s *ClientStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	}
 
 	// 构建、执行查询
-	dbQueryStr := fmt.Sprintf(`
+	dbQueryStr := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT 
             %[1]s AS url, 
             COUNT(*) AS pv,
             COUNT(DISTINCT l.ip_id) AS uv
-        FROM "%[2]s_nginx_logs" l INDEXED BY idx_%[2]s_pv_ts_ip
+        FROM "%[2]s_nginx_logs" l
         %[4]s
         WHERE l.pageview_flag = 1 AND l.timestamp >= ? AND l.timestamp < ?%[5]s
         GROUP BY %[3]s
         ORDER BY uv DESC
         LIMIT ?`,
-		selectExpr, query.WebsiteID, groupExpr, joinClause, extraCondition)
+		selectExpr, query.WebsiteID, groupExpr, joinClause, extraCondition))
 
 	rows, err := s.repo.GetDB().Query(dbQueryStr, startTime.Unix(), endTime.Unix(), limit)
 	if err != nil {

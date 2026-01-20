@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -14,6 +15,7 @@ const (
 	envLogDestination    = "LOG_DEST"
 	envTaskInterval      = "TASK_INTERVAL"
 	envLogRetentionDays  = "LOG_RETENTION_DAYS"
+	envLogParseBatchSize = "LOG_PARSE_BATCH_SIZE"
 	envServerPort        = "SERVER_PORT"
 	envPVStatusCodes     = "PV_STATUS_CODES"
 	envPVExcludePatterns = "PV_EXCLUDE_PATTERNS"
@@ -21,6 +23,13 @@ const (
 	envDemoMode          = "DEMO_MODE"
 	envAccessKeys        = "ACCESS_KEYS"
 	envLanguage          = "APP_LANGUAGE"
+	envIPGeoCacheLimit   = "IP_GEO_CACHE_LIMIT"
+	envIPGeoAPIURL       = "IP_GEO_API_URL"
+	envDBDriver          = "DB_DRIVER"
+	envDBDSN             = "DB_DSN"
+	envDBMaxOpenConns    = "DB_MAX_OPEN_CONNS"
+	envDBMaxIdleConns    = "DB_MAX_IDLE_CONNS"
+	envDBConnMaxLifetime = "DB_CONN_MAX_LIFETIME"
 )
 
 var (
@@ -42,6 +51,9 @@ var (
 		LogDestination:   "file",
 		TaskInterval:     "1m",
 		LogRetentionDays: 30,
+		ParseBatchSize:   100,
+		IPGeoCacheLimit:  1000000,
+		IPGeoAPIURL:      DefaultIPGeoAPIURL,
 		DemoMode:         false,
 		AccessKeys:       nil,
 		Language:         "zh-CN",
@@ -49,12 +61,26 @@ var (
 	defaultServer = ServerConfig{
 		Port: ":8089",
 	}
+	defaultDatabase = DatabaseConfig{
+		Driver:          "postgres",
+		DSN:             "",
+		MaxOpenConns:    10,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: "30m",
+	}
 )
 
 func DefaultConfig() Config {
 	return Config{
 		System: defaultSystem,
 		Server: defaultServer,
+		Database: DatabaseConfig{
+			Driver:          defaultDatabase.Driver,
+			DSN:             defaultDatabase.DSN,
+			MaxOpenConns:    defaultDatabase.MaxOpenConns,
+			MaxIdleConns:    defaultDatabase.MaxIdleConns,
+			ConnMaxLifetime: defaultDatabase.ConnMaxLifetime,
+		},
 		PVFilter: PVFilterConfig{
 			StatusCodeInclude: copyIntSlice(defaultStatusCodeInclude),
 			ExcludePatterns:   copyStringSlice(defaultExcludePatterns),
@@ -63,38 +89,42 @@ func DefaultConfig() Config {
 }
 
 func loadConfig() (*Config, error) {
-	cfg := &Config{}
+	cfg := DefaultConfig()
+	cfgPtr := &cfg
 	loaded := false
 
-	if raw, key := getEnvValue(envConfigJSON); raw != "" {
-		if err := json.Unmarshal([]byte(raw), cfg); err != nil {
+	if ForceEmptyConfigEnabled() {
+		loaded = false
+	} else if raw, key := getEnvValue(envConfigJSON); raw != "" {
+		if err := json.Unmarshal([]byte(raw), cfgPtr); err != nil {
 			return nil, fmt.Errorf("解析 %s 失败: %w", key, err)
 		}
 		loaded = true
 	} else {
 		bytes, err := os.ReadFile(ConfigFile)
 		if err == nil {
-			if err := json.Unmarshal(bytes, cfg); err != nil {
+			if err := json.Unmarshal(bytes, cfgPtr); err != nil {
 				return nil, err
 			}
 			loaded = true
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		} else if !HasEnvConfigSource() {
-			return nil, err
+			// 配置不存在且未注入环境变量，进入初始化模式
+			loaded = false
 		}
 	}
 
-	if err := applyEnvOverrides(cfg); err != nil {
+	if err := applyEnvOverrides(cfgPtr); err != nil {
 		return nil, err
 	}
-	applyDefaults(cfg)
+	applyDefaults(cfgPtr)
 
-	if !loaded && len(cfg.Websites) == 0 {
+	if !loaded && len(cfgPtr.Websites) == 0 && !NeedsSetup() {
 		return nil, fmt.Errorf("未提供网站配置")
 	}
 
-	return cfg, nil
+	return cfgPtr, nil
 }
 
 // HasEnvConfigSource reports if config can be loaded from env vars.
@@ -129,6 +159,29 @@ func applyEnvOverrides(cfg *Config) error {
 		}
 		cfg.System.LogRetentionDays = parsed
 	}
+	if raw, key := getEnvValue(envLogParseBatchSize); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", key, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("%s 必须大于0", key)
+		}
+		cfg.System.ParseBatchSize = parsed
+	}
+	if raw, key := getEnvValue(envIPGeoCacheLimit); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", key, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("%s 必须大于0", key)
+		}
+		cfg.System.IPGeoCacheLimit = parsed
+	}
+	if raw, _ := getEnvValue(envIPGeoAPIURL); raw != "" {
+		cfg.System.IPGeoAPIURL = strings.TrimSpace(raw)
+	}
 
 	if raw, key := getEnvValue(envDemoMode); raw != "" {
 		parsed, err := strconv.ParseBool(raw)
@@ -155,6 +208,39 @@ func applyEnvOverrides(cfg *Config) error {
 			raw = ":" + raw
 		}
 		cfg.Server.Port = raw
+	}
+
+	if raw, _ := getEnvValue(envDBDriver); raw != "" {
+		cfg.Database.Driver = raw
+	}
+	if raw, _ := getEnvValue(envDBDSN); raw != "" {
+		cfg.Database.DSN = raw
+	}
+	if raw, key := getEnvValue(envDBMaxOpenConns); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", key, err)
+		}
+		if parsed < 0 {
+			return fmt.Errorf("%s 不能小于0", key)
+		}
+		cfg.Database.MaxOpenConns = parsed
+	}
+	if raw, key := getEnvValue(envDBMaxIdleConns); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", key, err)
+		}
+		if parsed < 0 {
+			return fmt.Errorf("%s 不能小于0", key)
+		}
+		cfg.Database.MaxIdleConns = parsed
+	}
+	if raw, key := getEnvValue(envDBConnMaxLifetime); raw != "" {
+		if _, err := time.ParseDuration(raw); err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", key, err)
+		}
+		cfg.Database.ConnMaxLifetime = raw
 	}
 
 	if raw, key := getEnvValue(envPVStatusCodes); raw != "" {
@@ -194,12 +280,33 @@ func applyDefaults(cfg *Config) {
 	if cfg.System.LogRetentionDays <= 0 {
 		cfg.System.LogRetentionDays = defaultSystem.LogRetentionDays
 	}
+	if cfg.System.ParseBatchSize <= 0 {
+		cfg.System.ParseBatchSize = defaultSystem.ParseBatchSize
+	}
+	if cfg.System.IPGeoCacheLimit <= 0 {
+		cfg.System.IPGeoCacheLimit = defaultSystem.IPGeoCacheLimit
+	}
+	if cfg.System.IPGeoAPIURL == "" {
+		cfg.System.IPGeoAPIURL = defaultSystem.IPGeoAPIURL
+	}
 	if cfg.System.Language == "" {
 		cfg.System.Language = defaultSystem.Language
 	}
 	cfg.System.Language = NormalizeLanguage(cfg.System.Language)
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = defaultServer.Port
+	}
+	if cfg.Database.Driver == "" {
+		cfg.Database.Driver = defaultDatabase.Driver
+	}
+	if cfg.Database.MaxOpenConns <= 0 {
+		cfg.Database.MaxOpenConns = defaultDatabase.MaxOpenConns
+	}
+	if cfg.Database.MaxIdleConns <= 0 {
+		cfg.Database.MaxIdleConns = defaultDatabase.MaxIdleConns
+	}
+	if cfg.Database.ConnMaxLifetime == "" {
+		cfg.Database.ConnMaxLifetime = defaultDatabase.ConnMaxLifetime
 	}
 	if len(cfg.PVFilter.StatusCodeInclude) == 0 {
 		cfg.PVFilter.StatusCodeInclude = copyIntSlice(defaultStatusCodeInclude)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/likaia/nginxpulse/internal/config"
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 )
 
@@ -91,7 +92,7 @@ func (m *RealtimeStatsManager) Query(query StatsQuery) (StatsResult, error) {
 	browsers, _ := m.queryTopItems(tableName, uaJoin, "ua.browser", "ua.browser", startTime, endTime, 10, true)
 	result.Browsers = browsers
 
-	locationExpr := "CASE WHEN instr(loc.domestic, '·') > 0 THEN substr(loc.domestic, instr(loc.domestic, '·') + 1) ELSE loc.domestic END"
+	locationExpr := "CASE WHEN position('·' in loc.domestic) > 0 THEN substring(loc.domestic from position('·' in loc.domestic) + 1) ELSE loc.domestic END"
 	locationJoin := fmt.Sprintf(`JOIN "%s_dim_location" loc ON loc.id = l.location_id`, query.WebsiteID)
 	locations, _ := m.queryTopItems(
 		tableName,
@@ -109,11 +110,11 @@ func (m *RealtimeStatsManager) Query(query StatsQuery) (StatsResult, error) {
 }
 
 func (m *RealtimeStatsManager) activeVisitorCount(tableName string, startTime, endTime time.Time) (int, error) {
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT COUNT(DISTINCT ip_id)
         FROM "%s"
         WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?`,
-		tableName)
+		tableName))
 
 	row := m.repo.GetDB().QueryRow(query, startTime.Unix(), endTime.Unix())
 	var count int
@@ -124,12 +125,12 @@ func (m *RealtimeStatsManager) activeVisitorCount(tableName string, startTime, e
 }
 
 func (m *RealtimeStatsManager) activeSeries(tableName string, startTime, endTime time.Time, window int) ([]int, error) {
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT (timestamp / 60) as bucket, COUNT(DISTINCT ip_id) as uv
         FROM "%s"
         WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?
         GROUP BY bucket`,
-		tableName)
+		tableName))
 
 	rows, err := m.repo.GetDB().Query(query, startTime.Unix(), endTime.Unix())
 	if err != nil {
@@ -159,13 +160,13 @@ func (m *RealtimeStatsManager) activeSeries(tableName string, startTime, endTime
 }
 
 func (m *RealtimeStatsManager) deviceBreakdown(tableName string, startTime, endTime time.Time) []RealtimeItem {
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT ua.device, COUNT(DISTINCT l.ip_id) as uv
         FROM "%s" l
         JOIN "%s_dim_ua" ua ON ua.id = l.ua_id
         WHERE l.pageview_flag = 1 AND l.timestamp >= ? AND l.timestamp < ?
         GROUP BY ua.device`,
-		tableName, strings.TrimSuffix(tableName, "_nginx_logs"))
+		tableName, strings.TrimSuffix(tableName, "_nginx_logs")))
 
 	rows, err := m.repo.GetDB().Query(query, startTime.Unix(), endTime.Unix())
 	if err != nil {
@@ -221,7 +222,7 @@ func (m *RealtimeStatsManager) queryTopItems(
 		countExpr = "COUNT(DISTINCT l.ip_id)"
 	}
 
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT %[1]s as key, %[2]s as cnt
         FROM "%[3]s" l
         %[4]s
@@ -229,7 +230,7 @@ func (m *RealtimeStatsManager) queryTopItems(
         GROUP BY %[5]s
         ORDER BY cnt DESC
         LIMIT ?`,
-		selectExpr, countExpr, tableName, joinClause, groupExpr)
+		selectExpr, countExpr, tableName, joinClause, groupExpr))
 
 	rows, err := m.repo.GetDB().Query(query, startTime.Unix(), endTime.Unix(), limit)
 	if err != nil {
@@ -275,13 +276,13 @@ func (m *RealtimeStatsManager) entryPages(
 	tableName string,
 	startTime, endTime time.Time,
 ) ([]RealtimeItem, error) {
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT l.timestamp, l.ip_id, l.ua_id, u.url
         FROM "%s" l
         JOIN "%s_dim_url" u ON u.id = l.url_id
         WHERE l.pageview_flag = 1 AND l.timestamp >= ? AND l.timestamp < ?
         ORDER BY l.ip_id, l.ua_id, l.timestamp`,
-		tableName, strings.TrimSuffix(tableName, "_nginx_logs"))
+		tableName, strings.TrimSuffix(tableName, "_nginx_logs")))
 
 	rows, err := m.repo.GetDB().Query(query, startTime.Unix(), endTime.Unix())
 	if err != nil {

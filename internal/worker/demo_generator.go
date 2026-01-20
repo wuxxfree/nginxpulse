@@ -121,7 +121,7 @@ func fillDemoLocations(batch []store.NginxLogRecord) {
 		ips = append(ips, entry.IP)
 	}
 
-	locations := enrich.GetIPLocationBatch(ips)
+	locations, _ := enrich.GetIPLocationBatch(ips)
 	for i := range batch {
 		if location, ok := locations[batch[i].IP]; ok {
 			batch[i].DomesticLocation = location.Domestic

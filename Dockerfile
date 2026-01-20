@@ -32,6 +32,8 @@ ARG BUILD_TIME
 ARG GIT_COMMIT
 ARG VERSION
 RUN apk add --no-cache su-exec \
+    postgresql \
+    postgresql-client \
     && addgroup -S nginxpulse \
     && adduser -S nginxpulse -G nginxpulse
 
@@ -40,7 +42,7 @@ COPY entrypoint.sh /app/entrypoint.sh
 COPY docs/external_ips.txt /app/assets/external_ips.txt
 COPY --from=webapp-builder /app/webapp/dist /usr/share/nginx/html
 COPY configs/nginx_frontend.conf /etc/nginx/conf.d/default.conf
-RUN mkdir -p /app/var/nginxpulse_data /app/assets \
+RUN mkdir -p /app/var/nginxpulse_data /app/var/pgdata /app/assets \
     && chown -R nginxpulse:nginxpulse /app \
     && chmod +x /app/entrypoint.sh
 

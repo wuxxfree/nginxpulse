@@ -1,25 +1,27 @@
 <template>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <span class="brand-initials">NP</span>
-          <svg class="brand-pulse" viewBox="0 0 32 16" role="presentation" aria-hidden="true">
-            <path
-              d="M1 8H7L10 3L14 13L18 8H31"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            ></path>
-          </svg>
+  <div class="app-shell" :class="{ 'setup-shell': setupRequired }">
+    <SetupPage v-if="setupRequired" />
+    <template v-else>
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span class="brand-initials">NP</span>
+            <svg class="brand-pulse" viewBox="0 0 32 16" role="presentation" aria-hidden="true">
+              <path
+                d="M1 8H7L10 3L14 13L18 8H31"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              ></path>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">NginxPulse</div>
+            <div class="brand-sub">{{ t('app.brand.subtitle') }}</div>
+          </div>
         </div>
-        <div class="brand-text">
-          <div class="brand-title">NginxPulse</div>
-          <div class="brand-sub">{{ t('app.brand.subtitle') }}</div>
-        </div>
-      </div>
       <nav class="menu">
         <RouterLink to="/" class="menu-item" :class="{ active: isActive('/') }">{{ t('app.menu.overview') }}</RouterLink>
         <RouterLink to="/daily" class="menu-item" :class="{ active: isActive('/daily') }">{{ t('app.menu.daily') }}</RouterLink>
@@ -78,36 +80,37 @@
       </div>
     </aside>
 
-    <main class="main-content" :class="[mainClass, { 'parsing-lock': parsingActive }]">
-      <div v-if="demoMode" class="demo-mode-banner">
-        <span class="demo-mode-badge">{{ t('demo.badge') }}</span>
-        <span class="demo-mode-text">
-          {{ t('demo.text') }}
-          <a href="https://github.com/likaia/nginxpulse/" target="_blank" rel="noopener">https://github.com/likaia/nginxpulse/</a>
-        </span>
-      </div>
-      <RouterView :key="`${route.fullPath}-${currentLocale}-${accessKeyReloadToken}`" />
-    </main>
+      <main class="main-content" :class="[mainClass, { 'parsing-lock': parsingActive }]">
+        <div v-if="demoMode" class="demo-mode-banner">
+          <span class="demo-mode-badge">{{ t('demo.badge') }}</span>
+          <span class="demo-mode-text">
+            {{ t('demo.text') }}
+            <a href="https://github.com/likaia/nginxpulse/" target="_blank" rel="noopener">https://github.com/likaia/nginxpulse/</a>
+          </span>
+        </div>
+        <RouterView :key="`${route.fullPath}-${currentLocale}-${accessKeyReloadToken}`" />
+      </main>
 
-    <div v-if="accessKeyRequired" class="access-gate">
-      <div class="access-card">
-        <div class="access-title">{{ t('access.title') }}</div>
-        <div class="access-sub">{{ t('access.subtitle') }}</div>
-        <form class="access-form" @submit.prevent="submitAccessKey">
-          <input
-            v-model="accessKeyInput"
-            class="access-input"
-            type="password"
-            autocomplete="current-password"
-            :placeholder="t('access.placeholder')"
-          />
-          <button class="access-submit" type="submit" :disabled="accessKeySubmitting">
-            {{ accessKeySubmitting ? t('access.submitting') : t('access.submit') }}
-          </button>
-        </form>
-        <div v-if="accessKeyErrorMessage" class="access-error">{{ accessKeyErrorMessage }}</div>
+      <div v-if="accessKeyRequired" class="access-gate">
+        <div class="access-card">
+          <div class="access-title">{{ t('access.title') }}</div>
+          <div class="access-sub">{{ t('access.subtitle') }}</div>
+          <form class="access-form" @submit.prevent="submitAccessKey">
+            <input
+              v-model="accessKeyInput"
+              class="access-input"
+              type="password"
+              autocomplete="current-password"
+              :placeholder="t('access.placeholder')"
+            />
+            <button class="access-submit" type="submit" :disabled="accessKeySubmitting">
+              {{ accessKeySubmitting ? t('access.submitting') : t('access.submit') }}
+            </button>
+          </form>
+          <div v-if="accessKeyErrorMessage" class="access-error">{{ accessKeyErrorMessage }}</div>
+        </div>
       </div>
-    </div>
+    </template>
   </div>
 </template>
 
@@ -119,6 +122,7 @@ import { useI18n } from 'vue-i18n';
 import { fetchAppStatus } from '@/api';
 import { getLocaleFromQuery, getStoredLocale, normalizeLocale, setLocale } from '@/i18n';
 import { primevueLocales } from '@/i18n/primevue';
+import SetupPage from '@/pages/SetupPage.vue';
 
 const route = useRoute();
 const primevue = usePrimeVue();
@@ -143,6 +147,8 @@ const isDark = ref(localStorage.getItem('darkMode') === 'true');
 const parsingActive = ref(false);
 const liveVisitorCount = ref<number | null>(null);
 const demoMode = ref(false);
+const migrationRequired = ref(false);
+const setupRequired = ref(false);
 const appVersion = ref('');
 const accessKeyRequired = ref(false);
 const accessKeySubmitting = ref(false);
@@ -213,11 +219,14 @@ provide('setLiveVisitorCount', (value: number | null) => {
 });
 
 provide('demoMode', demoMode);
+provide('migrationRequired', migrationRequired);
 
 async function refreshAppStatus() {
   try {
     const status = await fetchAppStatus();
     demoMode.value = Boolean(status.demo_mode);
+    migrationRequired.value = Boolean(status.migration_required);
+    setupRequired.value = Boolean(status.setup_required);
     appVersion.value = status.version ?? '';
     accessKeyRequired.value = false;
     accessKeyErrorKey.value = null;

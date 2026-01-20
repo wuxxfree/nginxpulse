@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/likaia/nginxpulse/internal/sqlutil"
 	"github.com/likaia/nginxpulse/internal/store"
 	"github.com/likaia/nginxpulse/internal/timeutil"
 	"github.com/sirupsen/logrus"
@@ -185,13 +186,13 @@ func (s *OverallStatsManager) statsByTimeRangeForWebsite(
 	startDay := dayBucket(startTime)
 	endDay := dayBucket(endTime)
 
-	aggQuery := fmt.Sprintf(`
+	aggQuery := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT 
             COALESCE(SUM(pv), 0) as pv,
             COALESCE(SUM(traffic), 0) as traffic
         FROM "%s_agg_daily"
         WHERE day >= ? AND day <= ?`,
-		websiteID)
+		websiteID))
 
 	var pv int64
 	var traffic int64
@@ -202,11 +203,11 @@ func (s *OverallStatsManager) statsByTimeRangeForWebsite(
 	overall.PV = int(pv)
 	overall.Traffic = traffic
 
-	uvQuery := fmt.Sprintf(`
+	uvQuery := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT COUNT(DISTINCT ip_id) as uv
         FROM "%s_agg_daily_ip"
         WHERE day >= ? AND day <= ?`,
-		websiteID)
+		websiteID))
 
 	var uv int64
 	row = s.repo.GetDB().QueryRow(uvQuery, startDay, endDay)
@@ -225,7 +226,7 @@ func (s *OverallStatsManager) statusCodeHitsByTimeRangeForWebsite(
 	startDay := dayBucket(startTime)
 	endDay := dayBucket(endTime)
 
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT
             COALESCE(SUM(s2xx), 0) AS s2xx,
             COALESCE(SUM(s3xx), 0) AS s3xx,
@@ -234,7 +235,7 @@ func (s *OverallStatsManager) statusCodeHitsByTimeRangeForWebsite(
             COALESCE(SUM(other), 0) AS other
         FROM "%s_agg_daily"
         WHERE day >= ? AND day <= ?`,
-		websiteID)
+		websiteID))
 
 	row := s.repo.GetDB().QueryRow(query, startDay, endDay)
 	if err := row.Scan(&result.S2xx, &result.S3xx, &result.S4xx, &result.S5xx, &result.Other); err != nil {
@@ -297,21 +298,27 @@ func collectSessionMetricsFromAggregates(
 	entryTable := fmt.Sprintf("%s_agg_entry_daily", websiteID)
 	urlTable := fmt.Sprintf("%s_dim_url", websiteID)
 
-	row := db.QueryRow(fmt.Sprintf(
-		`SELECT COALESCE(SUM(sessions), 0) FROM "%s" WHERE day >= ? AND day <= ?`, sessionTable,
-	), startDay, endDay)
+	row := db.QueryRow(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(
+			`SELECT COALESCE(SUM(sessions), 0) FROM "%s" WHERE day >= ? AND day <= ?`, sessionTable,
+		)),
+		startDay, endDay,
+	)
 	if err := row.Scan(&metrics.SessionCount); err != nil {
 		return metrics, err
 	}
 
-	rows, err := db.Query(fmt.Sprintf(
-		`SELECT u.url, SUM(e.count)
+	rows, err := db.Query(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(
+			`SELECT u.url, SUM(e.count)
          FROM "%s" e
          JOIN "%s" u ON u.id = e.entry_url_id
          WHERE e.day >= ? AND e.day <= ?
-         GROUP BY e.entry_url_id`,
-		entryTable, urlTable,
-	), startDay, endDay)
+         GROUP BY e.entry_url_id, u.url`,
+			entryTable, urlTable,
+		)),
+		startDay, endDay,
+	)
 	if err != nil {
 		return metrics, err
 	}
@@ -347,21 +354,27 @@ func collectSessionMetricsFromSessions(
 	sessionTable := fmt.Sprintf("%s_sessions", websiteID)
 	urlTable := fmt.Sprintf("%s_dim_url", websiteID)
 
-	row := db.QueryRow(fmt.Sprintf(
-		`SELECT COUNT(*) FROM "%s" WHERE start_ts >= ? AND start_ts < ?`, sessionTable,
-	), startTime.Unix(), endTime.Unix())
+	row := db.QueryRow(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(
+			`SELECT COUNT(*) FROM "%s" WHERE start_ts >= ? AND start_ts < ?`, sessionTable,
+		)),
+		startTime.Unix(), endTime.Unix(),
+	)
 	if err := row.Scan(&metrics.SessionCount); err != nil {
 		return metrics, err
 	}
 
-	rows, err := db.Query(fmt.Sprintf(
-		`SELECT u.url, COUNT(*)
+	rows, err := db.Query(
+		sqlutil.ReplacePlaceholders(fmt.Sprintf(
+			`SELECT u.url, COUNT(*)
          FROM "%s" s
          JOIN "%s" u ON u.id = s.entry_url_id
          WHERE s.start_ts >= ? AND s.start_ts < ?
-         GROUP BY s.entry_url_id`,
-		sessionTable, urlTable,
-	), startTime.Unix(), endTime.Unix())
+         GROUP BY s.entry_url_id, u.url`,
+			sessionTable, urlTable,
+		)),
+		startTime.Unix(), endTime.Unix(),
+	)
 	if err != nil {
 		return metrics, err
 	}
@@ -394,13 +407,13 @@ func collectSessionMetricsFromLogs(
 		EntryCounts: make(map[string]int),
 	}
 
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT l.timestamp, l.ip_id, l.ua_id, u.url
-        FROM "%s_nginx_logs" l INDEXED BY idx_%s_session_key
+        FROM "%s_nginx_logs" l
         JOIN "%s_dim_url" u ON u.id = l.url_id
         WHERE l.pageview_flag = 1 AND l.timestamp >= ? AND l.timestamp < ?
         ORDER BY l.ip_id, l.ua_id, l.timestamp`,
-		websiteID, websiteID, websiteID)
+		websiteID, websiteID, websiteID))
 
 	rows, err := repo.GetDB().Query(query, startTime.Unix(), endTime.Unix())
 	if err != nil {
@@ -445,11 +458,16 @@ func collectSessionMetricsFromLogs(
 }
 
 func tableExists(db *sql.DB, tableName string) (bool, error) {
-	row := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, tableName,
-	)
-	var name string
-	if err := row.Scan(&name); err != nil {
+	row := db.QueryRow(sqlutil.ReplacePlaceholders(
+		`SELECT 1
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind IN ('r', 'p')
+           AND c.relname = ?`,
+	), tableName)
+	var exists int
+	if err := row.Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -510,11 +528,11 @@ func (s *OverallStatsManager) activeVisitorCount(websiteID string) (int, error) 
 	now := time.Now()
 	start := now.Add(-15 * time.Minute)
 
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         SELECT COUNT(DISTINCT ip_id)
         FROM "%s_nginx_logs"
         WHERE pageview_flag = 1 AND timestamp >= ? AND timestamp < ?`,
-		websiteID)
+		websiteID))
 
 	row := s.repo.GetDB().QueryRow(query, start.Unix(), now.Unix())
 	var count int
@@ -530,7 +548,7 @@ func (s *OverallStatsManager) newReturningCounts(
 	startDay := dayBucket(startTime)
 	endDay := dayBucket(endTime)
 
-	query := fmt.Sprintf(`
+	query := sqlutil.ReplacePlaceholders(fmt.Sprintf(`
         WITH active_ips AS (
             SELECT DISTINCT ip_id
             FROM "%s_agg_daily_ip"
@@ -541,7 +559,7 @@ func (s *OverallStatsManager) newReturningCounts(
             COALESCE(SUM(CASE WHEN fs.first_ts < ? THEN 1 ELSE 0 END), 0) AS returning_uv
         FROM active_ips a
         LEFT JOIN "%s_first_seen" fs ON fs.ip_id = a.ip_id`,
-		websiteID, websiteID)
+		websiteID, websiteID))
 
 	row := s.repo.GetDB().QueryRow(
 		query,
