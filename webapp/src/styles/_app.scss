@@ -400,6 +400,19 @@ body.dark-mode .sidebar-footer {
     overflow: auto;
 }
 
+.main-content.logs-page .logs-table {
+    flex: 1;
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
+}
+
+.main-content.logs-page .logs-table .p-datatable-wrapper {
+    flex: 1;
+    min-height: 320px;
+}
+
+
 .main-content.logs-page .pagination-box,
 .main-content.logs-page .page-footer {
     flex-shrink: 0;
