@@ -27,11 +27,12 @@ docker run -d --name nginxpulse \
 - `PGDATA`: PG 数据目录（默认 `/app/var/pgdata`）
 
 如果你想外接自建 PG，可显式传入 `DB_DSN`，内置 PG 会被绕过。
+此时不会启动内置 PG，`POSTGRES_*` 参数会被忽略，`/app/var/pgdata` 也无需挂载。
 
 ## Docker Compose
 仓库根目录已提供 `docker-compose.yml`，可直接复制修改：
 - 调整 `WEBSITES` 与日志挂载路径。
-- 挂载 `nginxpulse_data` 与 `pgdata` 保持数据持久化。
+- 挂载 `nginxpulse_data` 保持数据持久化；如使用内置 PG 再挂载 `pgdata`。
 - 保持 `/etc/localtime` 只读挂载，以确保时区一致。
 
 ## 单体部署（非 Docker）

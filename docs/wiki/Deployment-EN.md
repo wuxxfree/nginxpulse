@@ -27,11 +27,12 @@ Useful env vars (built-in PG):
 - `PGDATA` (default `/app/var/pgdata`)
 
 If you want to use an external PG, set `DB_DSN` and the built-in PG will be bypassed.
+In this case the built-in PG will not start, `POSTGRES_*` is ignored, and you can drop the `/app/var/pgdata` mount.
 
 ## Docker Compose
 A `docker-compose.yml` is provided in the repo. Update:
 - `WEBSITES` and log volume
-- `nginxpulse_data` and `pgdata` volumes
+- `nginxpulse_data` volume; mount `pgdata` only when using built-in PG
 - `/etc/localtime` mount for timezone
 
 ## Single binary (non-Docker)
