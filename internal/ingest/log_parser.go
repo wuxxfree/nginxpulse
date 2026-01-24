@@ -47,7 +47,7 @@ const (
 )
 
 var (
-	ipAliases        = []string{"ip", "remote_addr", "client_ip"}
+	ipAliases        = []string{"ip", "remote_addr", "client_ip", "http_x_forwarded_for"}
 	timeAliases      = []string{"time", "time_local", "time_iso8601"}
 	methodAliases    = []string{"method", "request_method"}
 	urlAliases       = []string{"url", "request_uri", "uri", "path"}
@@ -1528,9 +1528,14 @@ func tokenRegexForVar(name string, used map[string]bool) string {
 		return "(?P<" + group + ">" + pattern + ")"
 	}
 
+	commaListPattern := `[^,\s]+(?:,\s*[^,\s]+)*`
+	optionalTokenPattern := `\S*`
+
 	switch name {
 	case "remote_addr":
 		return addGroup("ip", `\S+`)
+	case "http_x_forwarded_for":
+		return addGroup("http_x_forwarded_for", commaListPattern)
 	case "remote_user":
 		return addGroup("user", `\S+`)
 	case "time_local":
@@ -1543,6 +1548,10 @@ func tokenRegexForVar(name string, used map[string]bool) string {
 		return addGroup("method", `\S+`)
 	case "request_uri", "uri":
 		return addGroup("url", `\S+`)
+	case "args":
+		return addGroup("args", optionalTokenPattern)
+	case "query_string":
+		return addGroup("query_string", optionalTokenPattern)
 	case "status":
 		return addGroup("status", `\d{3}`)
 	case "body_bytes_sent", "bytes_sent":
@@ -1551,6 +1560,26 @@ func tokenRegexForVar(name string, used map[string]bool) string {
 		return addGroup("referer", `[^"]*`)
 	case "http_user_agent":
 		return addGroup("ua", `[^"]*`)
+	case "host":
+		return addGroup("host", `\S+`)
+	case "server_name":
+		return addGroup("server_name", `\S+`)
+	case "scheme":
+		return addGroup("scheme", `\S+`)
+	case "request_length":
+		return addGroup("request_length", `\d+`)
+	case "remote_port":
+		return addGroup("remote_port", `\d+`)
+	case "upstream_addr":
+		return addGroup("upstream_addr", commaListPattern)
+	case "upstream_status":
+		return addGroup("upstream_status", commaListPattern)
+	case "upstream_response_time":
+		return addGroup("upstream_response_time", commaListPattern)
+	case "upstream_connect_time":
+		return addGroup("upstream_connect_time", commaListPattern)
+	case "upstream_header_time":
+		return addGroup("upstream_header_time", commaListPattern)
 	default:
 		return `\S+`
 	}
