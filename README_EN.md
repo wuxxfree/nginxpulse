@@ -29,6 +29,7 @@ Lightweight Nginx access log analytics and visualization dashboard with realtime
 - [Docker Deployment Permissions](#docker-deployment-permissions)
 - [FAQ](#faq)
 - [Directory Structure and Key Files](#directory-structure-and-key-files)
+- [Acknowledgements](#acknowledgements)
 - [Final Notes](#final-notes)
 
 ## Tech Stack
@@ -303,6 +304,16 @@ Fix (choose one):
 ---
 
 For more details on analytics definitions or API extension points, start with `internal/analytics/` and `internal/web/handler.go`.
+
+## Acknowledgements
+
+Thank you very much for your [coin investment](https://resource.kaisir.cn/uploads/MarkDownImg/20260128/pEZcuA.jpg) for your support of this project.
+
+<p align="left">
+  <img src="docs/thanks/supporter-1.png" width="60" height="60" alt="supporter-1" />
+  <img src="docs/thanks/supporter-2.png" width="60" height="60" alt="supporter-2" />
+  <img src="docs/thanks/supporter-3.png" width="60" height="60" alt="supporter-3" />
+</p>
 
 ## Final Notes
 

@@ -28,6 +28,7 @@
 - [Docker 部署权限说明](#docker-部署权限说明)
 - [常见问题](#常见问题)
 - [目录结构与主要文件](#目录结构与主要文件)
+- [致谢](#致谢)
 
 ## 项目开发技术栈
 **重要提示（版本 > 1.5.3）**：已完全弃用 SQLite；单体部署必须自备 PostgreSQL 并配置 `DB_DSN`（或 `database.dsn`）。
@@ -302,6 +303,16 @@ nginxpulse: initializing postgres data dir at /app/var/pgdata
 ---
 
 如需更详细的统计口径或 API 扩展，建议从 `internal/analytics/` 与 `internal/web/handler.go` 开始。
+
+## 致谢
+
+非常感谢诸位好兄弟/姐妹对此项目的[投币](https://resource.kaisir.cn/uploads/MarkDownImg/20260128/pEZcuA.jpg)支持。
+
+<p align="left">
+  <img src="docs/thanks/supporter-1.png" width="60" height="60" alt="supporter-1" />
+  <img src="docs/thanks/supporter-2.png" width="60" height="60" alt="supporter-2" />
+  <img src="docs/thanks/supporter-3.png" width="60" height="60" alt="supporter-3" />
+</p>
 
 ## 写在最后
 
