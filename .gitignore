@@ -10,6 +10,7 @@ weblog_eg/
 .DS_Store
 node_modules/
 dist/
+appstore_pr/
 internal/webui/dist/
 npm-debug.log*
 yarn-debug.log*
