@@ -1,24 +1,13 @@
-version: "3.8"
 services:
   nginxpulse:
-    image: nginxpulse:local
-    build:
-      context: .
-    container_name: nginxpulse
+    image: magiccoders/nginxpulse:latest
+    container_name: local_nginxpulse
     ports:
       - "8088:8088"
       - "8089:8089"
-    environment:
-      # 这里的UID/GID需要跟你主机上查到的保持一致
-      PUID: "1000"
-      PGID: "1000"
-      WEBSITES: '[{"name":"主站","logPath":"/share/log/nginx/access.log","domains":["kaisir.cn","www.kaisir.cn"]}]'
-      POSTGRES_USER: "nginxpulse"
-      POSTGRES_PASSWORD: "nginxpulse"
-      POSTGRES_DB: "nginxpulse"
     volumes:
-      - ./nginx_data/logs/all/access.log:/share/log/nginx/access.log:ro
-      - ./var/nginxpulse_data:/app/var/nginxpulse_data
-      - ./var/pgdata:/app/var/pgdata
-      - /etc/localtime:/etc/localtime:ro
+      - ./docker_local/logs:/share/logs
+      - ./docker_local/nginxpulse_data:/app/var/nginxpulse_data
+      - ./docker_local/pgdata:/app/var/pgdata
+      - /etc/localtime:/etc/localtime
     restart: unless-stopped
