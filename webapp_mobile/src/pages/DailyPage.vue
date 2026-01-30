@@ -1,0 +1,297 @@
+<template>
+  <div class="mobile-page">
+    <section class="mobile-panel">
+      <div class="mobile-panel-header">
+        <div>
+          <div class="section-title">{{ t('daily.title') }}</div>
+          <div class="section-sub">{{ t('daily.subtitle') }}</div>
+        </div>
+        <van-button size="small" type="primary" plain icon="replay" @click="refreshDaily">
+          {{ t('common.refresh') }}
+        </van-button>
+      </div>
+      <van-dropdown-menu>
+        <van-dropdown-item v-model="currentWebsiteId" :options="websiteOptions" />
+        <van-dropdown-item v-model="dateOption" :options="dateOptions" />
+      </van-dropdown-menu>
+    </section>
+
+    <van-empty v-if="!currentWebsiteId && !websitesLoading" :description="t('common.emptyWebsite')" />
+
+    <div v-else class="mobile-page">
+      <div v-if="loading" class="mobile-panel">
+        <van-loading size="24" />
+      </div>
+
+      <div v-else class="mobile-stack">
+        <div class="hero-card">
+          <div class="hero-title">{{ t('daily.title') }} · {{ currentDate }}</div>
+          <div class="hero-value">{{ summaryPv }}</div>
+          <div class="hero-meta">
+            <span>PV {{ summaryPv }}</span>
+            <span>UV {{ summaryUv }}</span>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <div v-for="item in metricCards" :key="item.key" class="metric-card">
+            <div class="metric-card-header">
+              <div class="metric-icon" :class="item.key">
+                <svg v-if="item.key === 'pv'" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 15l4-4 4 3 6-7" />
+                  <path d="M4 19h16" />
+                </svg>
+                <svg v-else-if="item.key === 'uv'" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="8" cy="8" r="3" />
+                  <circle cx="16" cy="10" r="3" />
+                  <path d="M4 19c0-3 2.5-5 5-5" />
+                  <path d="M12 19c0-2.5 2-4 4-4" />
+                </svg>
+                <svg v-else-if="item.key === 'session'" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="4" y="5" width="16" height="13" rx="3" />
+                  <path d="M8 10h8M8 14h5" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 18h16" />
+                  <path d="M7 16V8" />
+                  <path d="M12 16V6" />
+                  <path d="M17 16v-5" />
+                </svg>
+              </div>
+              <div class="metric-label">{{ item.label }}</div>
+            </div>
+            <div class="metric-value">{{ item.value }}</div>
+          </div>
+        </div>
+
+        <section class="mobile-panel list-card">
+          <div class="mobile-panel-header">
+            <div class="mobile-panel-title">{{ t('daily.trendTitle') }}</div>
+          </div>
+          <van-cell-group inset>
+            <van-cell
+              v-for="item in hourlyRows"
+              :key="item.label"
+              :title="item.label"
+            >
+              <template #label>
+                <van-progress :percentage="item.percent" stroke-width="6" :show-pivot="false" />
+              </template>
+              <template #value>
+                <div class="inline-tags">
+                  <van-tag type="primary">PV {{ item.pv }}</van-tag>
+                  <van-tag type="success">UV {{ item.uv }}</van-tag>
+                </div>
+              </template>
+            </van-cell>
+          </van-cell-group>
+          <div v-if="hourlyRows.length === 0" class="list-empty">{{ t('daily.trendEmpty') }}</div>
+        </section>
+      </div>
+    </div>
+
+    <van-calendar
+      v-model:show="calendarVisible"
+      :min-date="minDate"
+      :max-date="maxDate"
+      @confirm="onConfirmDate"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { fetchOverallStats, fetchTimeSeriesStats, fetchWebsites } from '@/api';
+import type { TimeSeriesStats, WebsiteInfo } from '@/api/types';
+import { formatDate, formatTraffic, getUserPreference, saveUserPreference } from '@/utils';
+
+const { t, n } = useI18n({ useScope: 'global' });
+
+const websites = ref<WebsiteInfo[]>([]);
+const websitesLoading = ref(false);
+const currentWebsiteId = ref('');
+const currentDate = ref(getUserPreference('dailyReportDate', '') || formatDate(new Date()));
+const dateOption = ref('today');
+const calendarVisible = ref(false);
+const isSyncingDateOption = ref(false);
+const loading = ref(false);
+const overall = ref<Record<string, any> | null>(null);
+const timeSeries = ref<TimeSeriesStats | null>(null);
+
+const minDate = new Date(2020, 0, 1);
+const maxDate = new Date();
+
+const websiteOptions = computed(() =>
+  websites.value.map((site) => ({ text: site.name, value: site.id }))
+);
+
+const todayLabel = computed(() => formatDate(new Date()));
+const yesterdayLabel = computed(() => {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return formatDate(date);
+});
+
+const dateOptions = computed(() => [
+  { text: t('common.today'), value: 'today' },
+  { text: t('common.yesterday'), value: 'yesterday' },
+  { text: currentDate.value, value: 'custom' },
+]);
+
+const metricCards = computed(() => {
+  const data = overall.value || {};
+  return [
+    {
+      key: 'pv',
+      label: t('daily.pv'),
+      value: formatCount(data.pv),
+    },
+    {
+      key: 'uv',
+      label: t('daily.uv'),
+      value: formatCount(data.uv),
+    },
+    {
+      key: 'session',
+      label: t('daily.session'),
+      value: formatCount(data.sessionCount),
+    },
+    {
+      key: 'traffic',
+      label: t('common.traffic'),
+      value: formatTraffic(Number(data.traffic || 0)),
+    },
+  ];
+});
+
+const summaryPv = computed(() => formatCount(overall.value?.pv));
+const summaryUv = computed(() => formatCount(overall.value?.uv));
+
+const hourlyMax = computed(() => {
+  const values = timeSeries.value?.pageviews || [];
+  return values.reduce((max, value) => (value > max ? value : max), 0);
+});
+
+const hourlyRows = computed(() => {
+  if (!timeSeries.value) {
+    return [] as Array<{ label: string; pv: string; uv: string }>;
+  }
+  return timeSeries.value.labels.map((label, index) => {
+    const pv = timeSeries.value?.pageviews?.[index] ?? 0;
+    const uv = timeSeries.value?.visitors?.[index] ?? 0;
+    const max = hourlyMax.value || 0;
+    const percent = max > 0 ? Math.min(100, Math.round((pv / max) * 100)) : 0;
+    return {
+      label,
+      pv: formatCount(pv),
+      uv: formatCount(uv),
+      percent,
+    };
+  });
+});
+
+function formatCount(value: number | string | undefined | null) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) {
+    return t('common.none');
+  }
+  return n(num);
+}
+
+function onConfirmDate(date: Date | Date[]) {
+  const picked = Array.isArray(date) ? date[0] : date;
+  currentDate.value = formatDate(picked);
+  dateOption.value = 'custom';
+  calendarVisible.value = false;
+}
+
+async function loadWebsites() {
+  websitesLoading.value = true;
+  try {
+    const data = await fetchWebsites();
+    websites.value = data || [];
+    const saved = getUserPreference('selectedWebsite', '');
+    if (saved && websites.value.find((site) => site.id === saved)) {
+      currentWebsiteId.value = saved;
+    } else if (websites.value.length > 0) {
+      currentWebsiteId.value = websites.value[0].id;
+    } else {
+      currentWebsiteId.value = '';
+    }
+  } catch (error) {
+    console.error('初始化网站失败:', error);
+    websites.value = [];
+    currentWebsiteId.value = '';
+  } finally {
+    websitesLoading.value = false;
+  }
+}
+
+async function refreshDaily() {
+  if (!currentWebsiteId.value) {
+    return;
+  }
+  loading.value = true;
+  try {
+    const [overallData, timeSeriesData] = await Promise.all([
+      fetchOverallStats(currentWebsiteId.value, currentDate.value),
+      fetchTimeSeriesStats(currentWebsiteId.value, currentDate.value, 'hourly'),
+    ]);
+    overall.value = overallData;
+    timeSeries.value = timeSeriesData;
+  } catch (error) {
+    console.error('加载日报失败:', error);
+  } finally {
+    loading.value = false;
+  }
+}
+
+watch(currentWebsiteId, (value) => {
+  if (value) {
+    saveUserPreference('selectedWebsite', value);
+  }
+  refreshDaily();
+});
+
+watch(dateOption, (value) => {
+  if (value === 'today') {
+    currentDate.value = todayLabel.value;
+  } else if (value === 'yesterday') {
+    currentDate.value = yesterdayLabel.value;
+  } else if (value === 'custom') {
+    if (!isSyncingDateOption.value) {
+      calendarVisible.value = true;
+    }
+  }
+  isSyncingDateOption.value = false;
+});
+
+watch(currentDate, (value) => {
+  if (value) {
+    saveUserPreference('dailyReportDate', value);
+  }
+  if (value === todayLabel.value && dateOption.value !== 'today') {
+    isSyncingDateOption.value = true;
+    dateOption.value = 'today';
+  } else if (value === yesterdayLabel.value && dateOption.value !== 'yesterday') {
+    isSyncingDateOption.value = true;
+    dateOption.value = 'yesterday';
+  } else if (value !== todayLabel.value && value !== yesterdayLabel.value && dateOption.value !== 'custom') {
+    isSyncingDateOption.value = true;
+    dateOption.value = 'custom';
+  }
+  refreshDaily();
+});
+
+onMounted(() => {
+  isSyncingDateOption.value = true;
+  dateOption.value =
+    currentDate.value === todayLabel.value
+      ? 'today'
+      : currentDate.value === yesterdayLabel.value
+        ? 'yesterday'
+        : 'custom';
+  loadWebsites();
+});
+</script>

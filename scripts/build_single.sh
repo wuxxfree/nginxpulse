@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEBAPP_DIR="$ROOT_DIR/webapp"
+WEBAPP_MOBILE_DIR="$ROOT_DIR/webapp_mobile"
 WEBUI_DIST_DIR="$ROOT_DIR/internal/webui/dist"
+WEBUI_DIST_MOBILE_DIR="$ROOT_DIR/internal/webui/dist_mobile"
 BIN_DIR="$ROOT_DIR/bin"
 CONFIG_SRC="$ROOT_DIR/configs/nginxpulse_config.json"
 GZ_LOG_SRC="$ROOT_DIR/var/log/gz-log-read-test"
@@ -33,6 +35,16 @@ fi
 
 if [[ ! -f "$WEBAPP_DIR/package.json" ]]; then
   echo "webapp/package.json not found." >&2
+  exit 1
+fi
+
+if [[ ! -d "$WEBAPP_MOBILE_DIR" ]]; then
+  echo "webapp_mobile directory not found." >&2
+  exit 1
+fi
+
+if [[ ! -f "$WEBAPP_MOBILE_DIR/package.json" ]]; then
+  echo "webapp_mobile/package.json not found." >&2
   exit 1
 fi
 
@@ -85,10 +97,17 @@ copy_support_files() {
 echo "Building frontend..."
 (cd "$WEBAPP_DIR" && npm install && npm run build)
 
+echo "Building mobile frontend..."
+(cd "$WEBAPP_MOBILE_DIR" && npm install && npm run build)
+
 echo "Preparing embedded assets..."
 rm -rf "$WEBUI_DIST_DIR"
 mkdir -p "$WEBUI_DIST_DIR"
 cp -R "$WEBAPP_DIR/dist/." "$WEBUI_DIST_DIR/"
+
+rm -rf "$WEBUI_DIST_MOBILE_DIR"
+mkdir -p "$WEBUI_DIST_MOBILE_DIR"
+cp -R "$WEBAPP_MOBILE_DIR/dist/." "$WEBUI_DIST_MOBILE_DIR/"
 
 echo "Target platforms: ${PLATFORMS}"
 IFS=',' read -r -a platform_list <<< "$PLATFORMS"

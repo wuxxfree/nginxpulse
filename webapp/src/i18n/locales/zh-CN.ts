@@ -25,6 +25,7 @@ const zhCN = {
     loading: '加载中...',
     noData: '暂无数据',
     noResults: '没有找到结果',
+    noMore: '没有更多了',
     requestFailed: '请求失败',
     retry: '重试',
     close: '关闭',
@@ -33,6 +34,7 @@ const zhCN = {
     confirm: '确定',
     search: '搜索',
     select: '选择',
+    refresh: '刷新',
     website: '站点',
     selectWebsite: '选择站点',
     emptyWebsite: '暂无站点',
@@ -75,6 +77,11 @@ const zhCN = {
   demo: {
     badge: '演示模式',
     text: '当前处于演示模式，数据均为模拟数据。项目源码请移步：',
+  },
+  mobile: {
+    setupRequiredTitle: '需要在电脑完成初始化',
+    setupRequiredDesc: '当前系统尚未完成首次配置，请使用电脑浏览器打开 NginxPulse 完成配置。',
+    setupRequiredHint: '完成后可在手机端访问 /m 查看概览、日报、实时与日志。',
   },
   access: {
     title: '需要访问密钥',

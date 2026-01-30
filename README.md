@@ -112,11 +112,24 @@ docker compose up -d
 - 默认使用当前系统时区
 - 可通过环境变量临时指定：`TZ=Asia/Shanghai ./nginxpulse`
 
+### 移动端访问（/m）
+- 入口地址：`http://<host>:8088/m`
+- 移动端仅提供 **概览 / 日报 / 实时 / 日志** 四个页面
+- **首次初始化必须在电脑端完成**，移动端会提示在电脑打开
+
 ### 3) 手动构建（前端、后端）
 前端构建：
 
 ```bash
 cd webapp
+npm install
+npm run build
+```
+
+移动端构建（/m）：
+
+```bash
+cd webapp_mobile
 npm install
 npm run build
 ```
@@ -166,7 +179,8 @@ CONFIG_JSON="$(cat /path/to/nginxpulse_config.json)" ./nginxpulse
 ### 5) Makefile 构建
 此项目也支持了通过Makefile来构建相关资源，命令如下：
 ```bash
-make frontend   # 构建前端 webapp/dist
+make frontend   # 构建前端（含移动端）webapp/dist + webapp_mobile/dist
+make frontend-mobile # 仅构建移动端 webapp_mobile/dist
 make backend    # 构建后端 bin/nginxpulse（不内嵌前端）
 make single     # 构建单体包（内嵌前端 + 复制配置与gzip示例）
 make dev        # 启动本地开发（前端8088，后端8089）
@@ -285,6 +299,9 @@ nginxpulse: initializing postgres data dir at /app/var/pgdata
 ├── webapp/
 │   └── src/
 │       └── main.ts                 # 前端入口
+├── webapp_mobile/                  # 移动端前端（/m）
+│   └── src/
+│       └── main.ts                 # 移动端入口
 ├── configs/
 │   ├── nginxpulse_config.json      # 核心配置入口
 │   ├── nginxpulse_config.dev.json  # 本地开发配置

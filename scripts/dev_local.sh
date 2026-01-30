@@ -10,6 +10,7 @@ LDFLAGS="-s -w -X 'github.com/likaia/nginxpulse/internal/version.Version=${VERSI
 
 backend_pid=""
 frontend_pid=""
+mobile_frontend_pid=""
 pg_started_by_us=0
 
 PG_CONTAINER="${PG_CONTAINER:-nginxpulse-postgres}"
@@ -56,21 +57,31 @@ ensure_config() {
 }
 
 ensure_frontend_deps() {
+  ensure_node_deps "$ROOT_DIR/webapp" "frontend"
+}
+
+ensure_mobile_frontend_deps() {
+  ensure_node_deps "$ROOT_DIR/webapp_mobile" "mobile frontend"
+}
+
+ensure_node_deps() {
+  local dir="$1"
+  local label="$2"
   local install_needed=0
-  if [[ ! -d "$ROOT_DIR/webapp/node_modules" ]]; then
+  if [[ ! -d "$dir/node_modules" ]]; then
     install_needed=1
-  elif [[ "$ROOT_DIR/webapp/package.json" -nt "$ROOT_DIR/webapp/node_modules" ]]; then
+  elif [[ "$dir/package.json" -nt "$dir/node_modules" ]]; then
     install_needed=1
-  elif [[ -f "$ROOT_DIR/webapp/package-lock.json" && "$ROOT_DIR/webapp/package-lock.json" -nt "$ROOT_DIR/webapp/node_modules" ]]; then
+  elif [[ -f "$dir/package-lock.json" && "$dir/package-lock.json" -nt "$dir/node_modules" ]]; then
     install_needed=1
   fi
 
   if [[ "$install_needed" -eq 1 ]]; then
-    echo "Installing frontend dependencies..."
-    if [[ -f "$ROOT_DIR/webapp/package-lock.json" ]]; then
-      (cd "$ROOT_DIR/webapp" && npm ci) || (cd "$ROOT_DIR/webapp" && npm install)
+    echo "Installing ${label} dependencies..."
+    if [[ -f "$dir/package-lock.json" ]]; then
+      (cd "$dir" && npm ci) || (cd "$dir" && npm install)
     else
-      (cd "$ROOT_DIR/webapp" && npm install)
+      (cd "$dir" && npm install)
     fi
   fi
 }
@@ -177,9 +188,18 @@ start_frontend() {
   frontend_pid=$!
 }
 
+start_mobile_frontend() {
+  echo "Starting mobile frontend on http://localhost:8087"
+  (cd "$ROOT_DIR/webapp_mobile" && npm run dev) &
+  mobile_frontend_pid=$!
+}
+
 cleanup() {
   if [[ -n "$frontend_pid" ]]; then
     kill "$frontend_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$mobile_frontend_pid" ]]; then
+    kill "$mobile_frontend_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$backend_pid" ]]; then
     if command -v pkill >/dev/null 2>&1; then
@@ -204,9 +224,11 @@ else
   echo "FORCE_SETUP_UI enabled, skipping config file checks."
 fi
 ensure_frontend_deps
+ensure_mobile_frontend_deps
 
 start_postgres
 start_backend
 start_frontend
+start_mobile_frontend
 
 wait

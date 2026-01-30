@@ -25,6 +25,7 @@ const enUS = {
     loading: 'Loading...',
     noData: 'No data',
     noResults: 'No results found',
+    noMore: 'No more data',
     requestFailed: 'Request failed',
     retry: 'Retry',
     close: 'Close',
@@ -33,6 +34,7 @@ const enUS = {
     confirm: 'OK',
     search: 'Search',
     select: 'Select',
+    refresh: 'Refresh',
     website: 'Website',
     selectWebsite: 'Select website',
     emptyWebsite: 'No websites',
@@ -75,6 +77,11 @@ const enUS = {
   demo: {
     badge: 'Demo Mode',
     text: 'Demo mode is enabled. All data is simulated. Source code:',
+  },
+  mobile: {
+    setupRequiredTitle: 'Finish setup on desktop',
+    setupRequiredDesc: 'This instance is not configured yet. Please open NginxPulse in a desktop browser to complete setup.',
+    setupRequiredHint: 'After setup, visit /m on mobile for Overview, Daily, Realtime, and Logs.',
   },
   access: {
     title: 'Access Key Required',

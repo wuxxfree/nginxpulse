@@ -1,4 +1,4 @@
-.PHONY: frontend backend single dev clean
+.PHONY: frontend frontend-mobile backend single dev clean
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 BUILD_TIME ?= $(shell date "+%Y-%m-%d %H:%M:%S")
@@ -7,6 +7,10 @@ LDFLAGS = -s -w -X 'github.com/likaia/nginxpulse/internal/version.Version=$(VERS
 
 frontend:
 	cd webapp && npm install && npm run build
+	cd webapp_mobile && npm install && npm run build
+
+frontend-mobile:
+	cd webapp_mobile && npm install && npm run build
 
 backend:
 	go build -ldflags="$(LDFLAGS)" -o bin/nginxpulse ./cmd/nginxpulse/main.go
@@ -18,4 +22,4 @@ dev:
 	./scripts/dev_local.sh
 
 clean:
-	rm -rf bin/nginxpulse internal/webui/dist webapp/dist
+	rm -rf bin/nginxpulse internal/webui/dist internal/webui/dist_mobile webapp/dist webapp_mobile/dist

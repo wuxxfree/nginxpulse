@@ -37,7 +37,7 @@
         <div class="live-card-body">
           <div class="live-value">{{ liveVisitorText }}</div>
           <div class="live-sub">{{ t('overview.liveStatus') }}</div>
-          <a class="ghost-link" href="/realtime?window=5">{{ t('overview.viewRealtime') }}</a>
+          <RouterLink class="ghost-link" to="/realtime?window=5">{{ t('overview.viewRealtime') }}</RouterLink>
         </div>
       </div>
       <div class="card metrics-card" data-anim>

@@ -8,3 +8,7 @@ import "io/fs"
 func AssetFS() (fs.FS, bool) {
 	return nil, false
 }
+
+func MobileAssetFS() (fs.FS, bool) {
+	return nil, false
+}

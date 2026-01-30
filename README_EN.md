@@ -113,11 +113,24 @@ This project uses the **system time zone** for log parsing and statistics. Make 
 - Uses the current system time zone by default
 - Temporary override: `TZ=Asia/Shanghai ./nginxpulse`
 
+### Mobile Access (/m)
+- Entry: `http://<host>:8088/m`
+- Mobile supports **Overview / Daily / Realtime / Logs** only
+- **Initial setup must be completed on desktop**; mobile will prompt to open on a computer
+
 ### 3) Manual Build (Frontend + Backend)
 Frontend build:
 
 ```bash
 cd webapp
+npm install
+npm run build
+```
+
+Mobile build (/m):
+
+```bash
+cd webapp_mobile
 npm install
 npm run build
 ```
@@ -167,7 +180,8 @@ Notes:
 ### 5) Makefile Commands
 This project also supports building via Makefile:
 ```bash
-make frontend   # Build frontend webapp/dist
+make frontend   # Build frontend (webapp/dist + webapp_mobile/dist)
+make frontend-mobile # Build only mobile webapp_mobile/dist
 make backend    # Build backend bin/nginxpulse (without embedded frontend)
 make single     # Build single package (embedded frontend + copy configs and gzip examples)
 make dev        # Start local development (frontend 8088, backend 8089)
@@ -286,6 +300,9 @@ Fix (choose one):
 ├── webapp/
 │   └── src/
 │       └── main.ts                 # Frontend entry
+├── webapp_mobile/                  # Mobile frontend (/m)
+│   └── src/
+│       └── main.ts                 # Mobile entry
 ├── configs/
 │   ├── nginxpulse_config.json      # Main config entry
 │   ├── nginxpulse_config.dev.json  # Local dev config

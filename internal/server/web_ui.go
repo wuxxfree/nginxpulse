@@ -18,43 +18,66 @@ func attachWebUI(router *gin.Engine) {
 		logrus.Info("未检测到内置前端资源，跳过静态页面服务")
 		return
 	}
+	mobileAssets, mobileOk := webui.MobileAssetFS()
+	if !mobileOk {
+		logrus.Info("未检测到内置移动端资源，/m 将无法访问")
+	}
 
 	fileServer := http.FileServer(http.FS(assets))
+	var mobileFileServer http.Handler
+	if mobileOk {
+		mobileFileServer = http.FileServer(http.FS(mobileAssets))
+	}
 
 	serveStatic := func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		if strings.HasPrefix(c.Request.URL.Path, "/api/") || c.Request.URL.Path == "/api" {
+		requestPath := c.Request.URL.Path
+		if strings.HasPrefix(requestPath, "/api/") || requestPath == "/api" || strings.HasPrefix(requestPath, "/m/api/") || requestPath == "/m/api" {
 			c.Status(http.StatusNotFound)
 			return
 		}
-
-		cleanPath := path.Clean("/" + c.Request.URL.Path)
-		cleanPath = strings.TrimPrefix(cleanPath, "/")
-		if cleanPath == "" || cleanPath == "index.html" {
-			serveIndex(assets, c)
+		isMobile := requestPath == "/m" || strings.HasPrefix(requestPath, "/m/")
+		if isMobile {
+			if !mobileOk {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			mobilePath := strings.TrimPrefix(requestPath, "/m")
+			serveStaticFromFS(mobileAssets, mobileFileServer, mobilePath, c)
 			return
 		}
 
-		if _, err := fs.Stat(assets, cleanPath); err == nil {
-			c.Request.URL.Path = "/" + cleanPath
-			fileServer.ServeHTTP(c.Writer, c.Request)
-			return
-		}
-
-		baseName := path.Base(cleanPath)
-		isAsset := strings.HasPrefix(cleanPath, "assets/") || strings.Contains(baseName, ".")
-		if isAsset {
-			c.Status(http.StatusNotFound)
-			return
-		}
-
-		serveIndex(assets, c)
+		serveStaticFromFS(assets, fileServer, requestPath, c)
 	}
 
 	router.NoRoute(serveStatic)
+}
+
+func serveStaticFromFS(assets fs.FS, fileServer http.Handler, requestPath string, c *gin.Context) {
+	cleanPath := path.Clean("/" + requestPath)
+	cleanPath = strings.TrimPrefix(cleanPath, "/")
+	if cleanPath == "" || cleanPath == "index.html" {
+		serveIndex(assets, c)
+		return
+	}
+
+	if _, err := fs.Stat(assets, cleanPath); err == nil {
+		c.Request.URL.Path = "/" + cleanPath
+		fileServer.ServeHTTP(c.Writer, c.Request)
+		return
+	}
+
+	baseName := path.Base(cleanPath)
+	isAsset := strings.HasPrefix(cleanPath, "assets/") || strings.Contains(baseName, ".")
+	if isAsset {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	serveIndex(assets, c)
 }
 
 func serveIndex(assets fs.FS, c *gin.Context) {

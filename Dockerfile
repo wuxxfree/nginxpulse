@@ -2,10 +2,14 @@ FROM node:20-alpine AS webapp-builder
 
 WORKDIR /app
 COPY webapp/package*.json ./webapp/
+COPY webapp_mobile/package*.json ./webapp_mobile/
 RUN cd webapp && npm install
+RUN cd webapp_mobile && npm install
 
 COPY webapp ./webapp
+COPY webapp_mobile ./webapp_mobile
 RUN cd webapp && npm run build
+RUN cd webapp_mobile && npm run build
 
 FROM golang:1.24.0-alpine AS backend-builder
 
@@ -43,6 +47,7 @@ COPY --from=backend-builder /out/nginxpulse /app/nginxpulse
 COPY entrypoint.sh /app/entrypoint.sh
 COPY docs/external_ips.txt /app/assets/external_ips.txt
 COPY --from=webapp-builder /app/webapp/dist /usr/share/nginx/html
+COPY --from=webapp-builder /app/webapp_mobile/dist /usr/share/nginx/html/m
 COPY configs/nginx_frontend.conf /etc/nginx/conf.d/default.conf
 RUN mkdir -p /app/var/nginxpulse_data /app/var/pgdata /app/assets \
     && chown -R nginxpulse:nginxpulse /app \
