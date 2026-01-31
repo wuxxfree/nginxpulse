@@ -147,4 +147,40 @@ export interface IPGeoAnomalyLog {
   global_location?: string;
 }
 
+export interface LogsExportStartResponse {
+  job_id: string;
+  status: string;
+  fileName?: string;
+}
+
+export interface LogsExportJob {
+  id: string;
+  status: string;
+  processed?: number;
+  total?: number;
+  fileName?: string;
+  error?: string;
+  created_at?: string;
+  updated_at?: string;
+  website_id?: string;
+}
+
+export interface LogsExportStatusResponse {
+  id: string;
+  status: string;
+  processed?: number;
+  total?: number;
+  fileName?: string;
+  error?: string;
+  created_at?: string;
+  updated_at?: string;
+  website_id?: string;
+}
+
+export interface LogsExportListResponse {
+  jobs: LogsExportJob[];
+  total?: number;
+  has_more?: boolean;
+}
+
 export type ApiResponse<T> = T;

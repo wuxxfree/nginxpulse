@@ -404,6 +404,246 @@ func SetupRoutes(
 		}
 	})
 
+	router.POST("/api/logs/export", func(c *gin.Context) {
+		if statsFactory == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "初始化模式暂不支持日志导出",
+			})
+			return
+		}
+
+		rawParams := make(map[string]any)
+		if err := c.ShouldBindJSON(&rawParams); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "请求参数错误",
+			})
+			return
+		}
+		if len(rawParams) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "导出参数不能为空",
+			})
+			return
+		}
+
+		params := make(map[string]string, len(rawParams))
+		for key, value := range rawParams {
+			if value == nil {
+				continue
+			}
+			params[key] = fmt.Sprint(value)
+		}
+
+		query, err := statsFactory.BuildQueryFromRequest("logs", params)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		if _, ok := config.GetWebsiteByID(query.WebsiteID); !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "站点不存在",
+			})
+			return
+		}
+
+		lang := params["lang"]
+		job, err := exportJobs.Create(statsFactory, query, lang, params)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"job_id":   job.ID,
+			"status":   job.Status,
+			"fileName": job.FileName,
+		})
+	})
+
+	router.GET("/api/logs/export/status", func(c *gin.Context) {
+		jobID := strings.TrimSpace(c.Query("id"))
+		if jobID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "任务 ID 不能为空",
+			})
+			return
+		}
+		job, ok := exportJobs.Get(jobID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "任务不存在",
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"id":         job.ID,
+			"status":     job.Status,
+			"processed":  job.Processed,
+			"total":      job.Total,
+			"fileName":   job.FileName,
+			"error":      job.Error,
+			"created_at": job.CreatedAt,
+			"updated_at": job.UpdatedAt,
+			"website_id": job.WebsiteID,
+		})
+	})
+
+	router.GET("/api/logs/export/list", func(c *gin.Context) {
+		websiteID := strings.TrimSpace(c.Query("id"))
+		page := 1
+		pageSize := 20
+		if rawPage := strings.TrimSpace(c.Query("page")); rawPage != "" {
+			if parsed, err := strconv.Atoi(rawPage); err == nil && parsed > 0 {
+				page = parsed
+			}
+		}
+		if rawPageSize := strings.TrimSpace(c.Query("pageSize")); rawPageSize != "" {
+			if parsed, err := strconv.Atoi(rawPageSize); err == nil && parsed > 0 {
+				pageSize = parsed
+			}
+		}
+		jobs, total := exportJobs.List(websiteID, page, pageSize)
+		hasMore := page*pageSize < total
+		c.JSON(http.StatusOK, gin.H{
+			"jobs":     jobs,
+			"total":    total,
+			"has_more": hasMore,
+		})
+	})
+
+	router.POST("/api/logs/export/cancel", func(c *gin.Context) {
+		type cancelRequest struct {
+			ID string `json:"id"`
+		}
+		var req cancelRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "请求参数错误",
+			})
+			return
+		}
+		jobID := strings.TrimSpace(req.ID)
+		if jobID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "任务 ID 不能为空",
+			})
+			return
+		}
+		job, err := exportJobs.Cancel(jobID)
+		if err != nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"id":     job.ID,
+			"status": job.Status,
+		})
+	})
+
+	router.POST("/api/logs/export/retry", func(c *gin.Context) {
+		type retryRequest struct {
+			ID string `json:"id"`
+		}
+		var req retryRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "请求参数错误",
+			})
+			return
+		}
+		jobID := strings.TrimSpace(req.ID)
+		if jobID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "任务 ID 不能为空",
+			})
+			return
+		}
+		params, ok := exportJobs.GetParams(jobID)
+		if !ok || len(params) == 0 {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "任务参数不存在",
+			})
+			return
+		}
+		query, err := statsFactory.BuildQueryFromRequest("logs", params)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+		if _, ok := config.GetWebsiteByID(query.WebsiteID); !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "站点不存在",
+			})
+			return
+		}
+		lang := params["lang"]
+		job, err := exportJobs.Create(statsFactory, query, lang, params)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"job_id":   job.ID,
+			"status":   job.Status,
+			"fileName": job.FileName,
+		})
+	})
+
+	router.GET("/api/logs/export/download", func(c *gin.Context) {
+		jobID := strings.TrimSpace(c.Query("id"))
+		if jobID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "任务 ID 不能为空",
+			})
+			return
+		}
+		job, ok := exportJobs.Get(jobID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "任务不存在",
+			})
+			return
+		}
+		if job.Status != logsExportSuccess {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "导出任务尚未完成",
+			})
+			return
+		}
+		if job.FilePath == "" {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "导出文件不存在",
+			})
+			return
+		}
+		if _, err := os.Stat(job.FilePath); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "导出文件不存在",
+			})
+			return
+		}
+
+		filename := job.FileName
+		if filename == "" {
+			filename = fmt.Sprintf("nginxpulse_logs_%s.csv", time.Now().Format("20060102_150405"))
+		}
+		c.Header("Content-Type", csvContentType)
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		c.Header("Cache-Control", "no-store")
+		c.File(job.FilePath)
+	})
+
 	router.POST("/api/ingest/logs", func(c *gin.Context) {
 		if logParser == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{

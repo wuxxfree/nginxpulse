@@ -48,21 +48,83 @@
               @click="handleExport"
             />
           </div>
-          <div class="filter-row filter-row-fields">
+        <div class="filter-row filter-row-fields">
+          <div class="filter-row-left">
             <div class="status-code-container">
               <label for="status-code">{{ t('logs.statusCode') }}</label>
-              <InputNumber
+              <InputText
                 v-model="statusCodeFilter"
                 inputId="status-code"
                 class="status-code-input"
                 :placeholder="t('logs.statusCodePlaceholder')"
-                :useGrouping="false"
-                :min="100"
-                :max="599"
-                :minFractionDigits="0"
-                :maxFractionDigits="0"
+              />
+              <div class="status-code-quick">
+                <button
+                  type="button"
+                  class="status-quick-btn"
+                  :class="{ active: statusClassPreset === '' && !statusCodeFilter.trim() }"
+                  @click="setStatusCodePreset('')"
+                >
+                  {{ t('common.all') }}
+                </button>
+                <button
+                  type="button"
+                  class="status-quick-btn"
+                  :class="{ active: statusClassPreset === '2xx' }"
+                  @click="setStatusCodePreset('2xx')"
+                >
+                  2xx
+                </button>
+                <button
+                  type="button"
+                  class="status-quick-btn"
+                  :class="{ active: statusClassPreset === '3xx' }"
+                  @click="setStatusCodePreset('3xx')"
+                >
+                  3xx
+                </button>
+                <button
+                  type="button"
+                  class="status-quick-btn"
+                  :class="{ active: statusClassPreset === '4xx' }"
+                  @click="setStatusCodePreset('4xx')"
+                >
+                  4xx
+                </button>
+                <button
+                  type="button"
+                  class="status-quick-btn"
+                  :class="{ active: statusClassPreset === '5xx' }"
+                  @click="setStatusCodePreset('5xx')"
+                >
+                  5xx
+                </button>
+              </div>
+            </div>
+            <div class="date-range-container">
+              <label>{{ t('logs.dateRange') }}</label>
+              <div class="date-range-inputs">
+                <Dropdown
+                  v-model="dateRangePreset"
+                  class="date-range-select"
+                  :options="dateRangePresetOptions"
+                  optionLabel="label"
+                  optionValue="value"
+                />
+              <DatePicker
+                v-model="dateRange"
+                class="date-range-picker"
+                dateFormat="yy-mm-dd"
+                selectionMode="range"
+                :hideOnRangeSelection="true"
+                showButtonBar
+                :showClear="true"
+                :placeholder="`${t('logs.dateStart')} - ${t('logs.dateEnd')}`"
               />
             </div>
+          </div>
+          </div>
+          <div class="filter-row-right">
             <div class="sort-field-container">
               <label for="sort-field">{{ t('logs.sortField') }}</label>
               <Dropdown
@@ -106,6 +168,7 @@
               <span>{{ advancedFiltersOpen ? t('logs.collapseFilters') : t('logs.advancedFilters') }}</span>
             </button>
           </div>
+        </div>
         </div>
         <transition name="filter-collapse">
           <div v-if="advancedFiltersOpen" class="filter-row filter-row-toggles">
@@ -432,6 +495,88 @@
         />
       </template>
     </Dialog>
+
+    <Dialog
+      v-model:visible="exportDialogVisible"
+      modal
+      class="reparse-dialog export-dialog"
+      :header="t('logs.exportDialogTitle')"
+    >
+      <div class="reparse-dialog-body">
+        <template v-if="exportJob">
+          <p>
+            {{ t('logs.exportCurrent') }}
+            <span class="export-status">{{ exportStatusLabel }}</span>
+          </p>
+          <div v-if="exportProgressPercent !== null" class="export-progress">
+            <div class="export-progress-bar" :style="{ width: `${exportProgressPercent}%` }"></div>
+          </div>
+          <p v-if="exportProgressText" class="reparse-dialog-note">{{ exportProgressText }}</p>
+        </template>
+        <p v-if="exportJobError" class="reparse-dialog-error">{{ exportJobError }}</p>
+        <p class="reparse-dialog-note">{{ t('logs.exportHistory') }}</p>
+        <DataTable
+          :value="exportJobs"
+          :loading="exportJobsLoading"
+          scrollable
+          scrollHeight="240px"
+          class="export-table"
+          ref="exportHistoryTableRef"
+        >
+          <Column :header="t('logs.time')">
+            <template #body="{ data }">
+              {{ formatExportJobTime(data.created_at) }}
+            </template>
+          </Column>
+          <Column :header="t('logs.exportStatus')">
+            <template #body="{ data }">
+              {{ formatExportStatus(data.status) }}
+            </template>
+          </Column>
+          <Column :header="t('logs.exportProgressLabel')">
+            <template #body="{ data }">
+              {{ formatExportJobProgress(data) }}
+            </template>
+          </Column>
+          <Column :header="t('logs.exportFile')">
+            <template #body="{ data }">
+              {{ data.fileName || '-' }}
+            </template>
+          </Column>
+          <Column :header="t('common.action')">
+            <template #body="{ data }">
+              <Button
+                text
+                severity="secondary"
+                :disabled="data.status !== 'success'"
+                :label="t('logs.exportDownload')"
+                @click="handleDownloadHistory(data)"
+              />
+              <Button
+                text
+                severity="secondary"
+                :disabled="!canRetryExport(data)"
+                :label="t('logs.exportRetry')"
+                @click="handleRetryHistory(data)"
+              />
+            </template>
+          </Column>
+        </DataTable>
+        <p v-if="exportHistoryHasMore" class="reparse-dialog-note">{{ t('logs.exportHistoryScrollHint') }}</p>
+        <p v-if="exportHistoryLoadingMore" class="reparse-dialog-note">{{ t('logs.exportHistoryLoadingMore') }}</p>
+      </div>
+      <template #footer>
+        <Button
+          v-if="exportJob && (exportJob.status === 'running' || exportJob.status === 'pending')"
+          text
+          severity="secondary"
+          :label="t('logs.exportCancel')"
+          :loading="exportCancelLoading"
+          @click="cancelExportJob"
+        />
+        <Button :label="t('common.close')" @click="exportDialogVisible = false" />
+      </template>
+    </Dialog>
   </div>
 </template>
 
@@ -442,15 +587,20 @@ import Dialog from 'primevue/dialog';
 import DataTable from 'primevue/datatable';
 import Column from 'primevue/column';
 import {
-  exportLogs,
   fetchIPGeoAnomaly,
   fetchLogs,
   fetchWebsites,
+  cancelLogsExport,
+  downloadLogsExport,
   reparseAllLogs,
   reparseLogs,
   repairIPGeoAnomaly,
+  listLogsExportJobs,
+  startLogsExport,
+  fetchLogsExportStatus,
+  retryLogsExport,
 } from '@/api';
-import type { IPGeoAnomalyLog, WebsiteInfo } from '@/api/types';
+import type { IPGeoAnomalyLog, LogsExportJob, WebsiteInfo } from '@/api/types';
 import { formatTraffic, getUserPreference, saveUserPreference } from '@/utils';
 import { formatBrowserLabel, formatDeviceLabel, formatLocationLabel, formatOSLabel, formatRefererLabel } from '@/i18n/mappings';
 import { normalizeLocale } from '@/i18n';
@@ -496,7 +646,13 @@ const excludeInternal = ref(false);
 const pageviewOnly = ref(false);
 const excludeSpider = ref(false);
 const excludeForeign = ref(false);
-const statusCodeFilter = ref<number | null>(null);
+const statusCodeFilter = ref('');
+const timeStart = ref<string>('');
+const timeEnd = ref<string>('');
+const dateRange = ref<Date[] | null>(null);
+const dateRangePreset = ref('custom');
+let updatingDatePreset = false;
+let updatingDateRange = false;
 const sortField = ref(getUserPreference('logsSortField', 'timestamp'));
 const sortOrder = ref(getUserPreference('logsSortOrder', 'desc'));
 const pageSize = ref(Number(getUserPreference('logsPageSize', '100')));
@@ -512,6 +668,20 @@ const migrationDialogVisible = ref(false);
 const migrationLoading = ref(false);
 const migrationError = ref('');
 const exportLoading = ref(false);
+const exportDialogVisible = ref(false);
+const exportJob = ref<LogsExportJob | null>(null);
+const exportJobError = ref('');
+const exportJobs = ref<LogsExportJob[]>([]);
+const exportJobsLoading = ref(false);
+const exportCancelLoading = ref(false);
+let exportPollTimer: ReturnType<typeof setInterval> | null = null;
+const exportHistoryPageSize = 20;
+const exportHistoryPage = ref(1);
+const exportHistoryHasMore = ref(false);
+const exportHistoryLoadingMore = ref(false);
+const exportHistoryTableRef = ref<InstanceType<typeof DataTable> | null>(null);
+let exportHistoryScrollHandler: ((event: Event) => void) | null = null;
+let exportHistoryTimer: ReturnType<typeof setInterval> | null = null;
 const ipGeoIssueVisible = ref(false);
 const ipGeoIssueLoading = ref(false);
 const ipGeoIssueFixLoading = ref(false);
@@ -546,6 +716,14 @@ const sortOrderOptions = computed(() => [
   { value: 'asc', label: t('logs.sortAsc') },
 ]);
 const pageSizeOptions = [50, 100, 200, 500].map((value) => ({ value, label: `${value}` }));
+const dateRangePresetOptions = computed(() => [
+  { value: 'today', label: t('common.today') },
+  { value: 'yesterday', label: t('common.yesterday') },
+  { value: 'last7Days', label: t('common.last7Days') },
+  { value: 'last30Days', label: t('common.last30Days') },
+  { value: 'all', label: t('common.all') },
+  { value: 'custom', label: t('logs.dateRangeCustom') },
+]);
 
 const rawLogs = ref<Array<Record<string, any>>>([]);
 const loading = ref(false);
@@ -646,6 +824,48 @@ const migrationButtonLabel = computed(() =>
 const exportButtonLabel = computed(() =>
   exportLoading.value ? t('logs.exportLoading') : t('logs.export')
 );
+const exportProgressPercent = computed(() => {
+  const job = exportJob.value;
+  if (!job || !job.total || job.total <= 0) {
+    return null;
+  }
+  const processed = job.processed ?? 0;
+  return Math.min(100, Math.max(0, Math.round((processed / job.total) * 100)));
+});
+const exportProgressText = computed(() => {
+  const job = exportJob.value;
+  if (!job) {
+    return '';
+  }
+  if (job.total && job.total > 0) {
+    return t('logs.exportProgress', { processed: job.processed ?? 0, total: job.total });
+  }
+  if (job.processed) {
+    return t('logs.exportProgressOnly', { processed: job.processed ?? 0 });
+  }
+  return '';
+});
+const exportStatusLabel = computed(() => {
+  const status = exportJob.value?.status;
+  if (!status) {
+    return '';
+  }
+  switch (status) {
+    case 'pending':
+      return t('logs.exportStatusPending');
+    case 'running':
+      return t('logs.exportStatusRunning');
+    case 'success':
+      return t('logs.exportStatusSuccess');
+    case 'failed':
+      return t('logs.exportStatusFailed');
+    case 'canceled':
+      return t('logs.exportStatusCanceled');
+    default:
+      return status;
+  }
+});
+const statusClassPreset = computed(() => parseStatusFilter(statusCodeFilter.value).statusClass || '');
 const isDemoMode = computed(() => demoMode?.value ?? false);
 const reparseDialogTitle = computed(() =>
   reparseDialogMode.value === 'blocked' ? t('demo.badge') : t('logs.reparseTitle')
@@ -683,19 +903,31 @@ function formatDurationSeconds(seconds: number) {
   return t('overview.durationSeconds', { seconds: secs });
 }
 
-function resolveStatusCodeParam() {
-  if (statusCodeFilter.value === null || statusCodeFilter.value === undefined) {
-    return undefined;
+function parseStatusFilter(value: string) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) {
+    return {};
   }
-  const value = Math.trunc(statusCodeFilter.value);
-  if (!Number.isFinite(value) || value < 100 || value > 599) {
-    return undefined;
+  if (/^[2-5]\d{2}$/.test(trimmed)) {
+    return { statusCode: trimmed };
   }
-  return String(value);
+  const classMatch = trimmed.match(/^([2-5])(?:xx|x{2,3}|\*{2,3})$/);
+  if (classMatch?.[1]) {
+    return { statusClass: `${classMatch[1]}xx` };
+  }
+  return {};
+}
+
+function resolveStatusParams() {
+  return parseStatusFilter(statusCodeFilter.value);
+}
+
+function setStatusCodePreset(preset: string) {
+  statusCodeFilter.value = preset;
 }
 
 function buildExportParams() {
-  const statusCode = resolveStatusCodeParam();
+  const { statusCode, statusClass } = resolveStatusParams();
   const params: Record<string, unknown> = {
     id: currentWebsiteId.value,
     page: currentPage.value,
@@ -706,6 +938,9 @@ function buildExportParams() {
   };
   if (searchFilter.value) {
     params.filter = searchFilter.value;
+  }
+  if (statusClass) {
+    params.statusClass = statusClass;
   }
   if (statusCode) {
     params.statusCode = statusCode;
@@ -721,6 +956,12 @@ function buildExportParams() {
   }
   if (excludeForeign.value) {
     params.excludeForeign = true;
+  }
+  if (timeStart.value) {
+    params.timeStart = timeStart.value;
+  }
+  if (timeEnd.value) {
+    params.timeEnd = timeEnd.value;
   }
   return params;
 }
@@ -753,27 +994,411 @@ function formatExportTimestamp() {
   )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
+function formatExportJobTime(value?: string) {
+  if (!value) {
+    return '-';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
+}
+
+function formatExportStatus(status?: string) {
+  if (!status) {
+    return '-';
+  }
+  switch (status) {
+    case 'pending':
+      return t('logs.exportStatusPending');
+    case 'running':
+      return t('logs.exportStatusRunning');
+    case 'success':
+      return t('logs.exportStatusSuccess');
+    case 'failed':
+      return t('logs.exportStatusFailed');
+    case 'canceled':
+      return t('logs.exportStatusCanceled');
+    default:
+      return status;
+  }
+}
+
+function formatExportJobProgress(job: LogsExportJob) {
+  const processed = job.processed ?? 0;
+  const total = job.total ?? 0;
+  if (total > 0) {
+    return `${processed}/${total}`;
+  }
+  if (processed > 0) {
+    return `${processed}`;
+  }
+  return '-';
+}
+
+function canRetryExport(job: LogsExportJob) {
+  return job.status === 'failed' || job.status === 'canceled';
+}
+
+function formatDateTimeValue(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function parseDateFromTime(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  return new Date(year, month, day);
+}
+
+function buildDateRangeFromTime(start: string, end: string) {
+  const startDate = start ? parseDateFromTime(start) : null;
+  const endDate = end ? parseDateFromTime(end) : null;
+  if (!startDate && !endDate) {
+    return null;
+  }
+  if (startDate && endDate) {
+    return [startDate, endDate];
+  }
+  return [startDate || endDate] as Date[];
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0);
+}
+
+function endOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59);
+}
+
+function applyDatePreset(preset: string) {
+  const now = new Date();
+  switch (preset) {
+    case 'today': {
+      timeStart.value = formatDateTimeValue(startOfDay(now));
+      timeEnd.value = formatDateTimeValue(now);
+      break;
+    }
+    case 'yesterday': {
+      const base = new Date(now);
+      base.setDate(base.getDate() - 1);
+      timeStart.value = formatDateTimeValue(startOfDay(base));
+      timeEnd.value = formatDateTimeValue(endOfDay(base));
+      break;
+    }
+    case 'last7Days': {
+      const start = new Date(now);
+      start.setDate(start.getDate() - 6);
+      timeStart.value = formatDateTimeValue(startOfDay(start));
+      timeEnd.value = formatDateTimeValue(now);
+      break;
+    }
+    case 'last30Days': {
+      const start = new Date(now);
+      start.setDate(start.getDate() - 29);
+      timeStart.value = formatDateTimeValue(startOfDay(start));
+      timeEnd.value = formatDateTimeValue(now);
+      break;
+    }
+    case 'all': {
+      timeStart.value = '';
+      timeEnd.value = '';
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 async function handleExport() {
   if (!currentWebsiteId.value || exportLoading.value) {
     return;
   }
   exportLoading.value = true;
+  exportDialogVisible.value = true;
+  exportJobError.value = '';
   try {
-    const response = await exportLogs(buildExportParams());
-    const headerName = extractExportFileName(response.headers?.['content-disposition']);
-    const fallbackName = `nginxpulse_logs_${formatExportTimestamp()}.csv`;
-    const fileName = headerName || fallbackName;
-    const url = window.URL.createObjectURL(response.data);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
+    const start = await startLogsExport(buildExportParams());
+    exportJob.value = {
+      id: start.job_id,
+      status: start.status,
+      fileName: start.fileName,
+    };
+    startExportPolling();
+    await refreshExportJobs();
   } catch (error) {
     console.error('导出日志失败:', error);
+    exportJobError.value = error instanceof Error ? error.message : t('logs.exportError');
+    exportLoading.value = false;
   } finally {
+  }
+}
+
+async function refreshExportJobs() {
+  if (!currentWebsiteId.value) {
+    exportJobs.value = [];
+    return;
+  }
+  exportJobsLoading.value = true;
+  try {
+    const response = await listLogsExportJobs(currentWebsiteId.value, 1, exportHistoryPageSize);
+    exportJobs.value = response.jobs || [];
+    exportHistoryPage.value = 1;
+    exportHistoryHasMore.value = Boolean(response.has_more);
+    updateExportHistoryPolling();
+  } catch (error) {
+    console.debug('读取导出任务失败:', error);
+  } finally {
+    exportJobsLoading.value = false;
+  }
+}
+
+async function loadMoreExportJobs() {
+  if (!currentWebsiteId.value || exportHistoryLoadingMore.value || !exportHistoryHasMore.value) {
+    return;
+  }
+  exportHistoryLoadingMore.value = true;
+  try {
+    const nextPage = exportHistoryPage.value + 1;
+    const response = await listLogsExportJobs(currentWebsiteId.value, nextPage, exportHistoryPageSize);
+    const incoming = response.jobs || [];
+    if (incoming.length > 0) {
+      const existing = new Set(exportJobs.value.map((job) => job.id));
+      const merged = exportJobs.value.slice();
+      for (const job of incoming) {
+        if (!existing.has(job.id)) {
+          merged.push(job);
+        }
+      }
+      exportJobs.value = merged;
+    }
+    exportHistoryPage.value = nextPage;
+    exportHistoryHasMore.value = Boolean(response.has_more);
+    updateExportHistoryPolling();
+  } catch (error) {
+    console.debug('加载更多导出任务失败:', error);
+  } finally {
+    exportHistoryLoadingMore.value = false;
+  }
+}
+
+async function refreshExportJobsSilently() {
+  if (!currentWebsiteId.value || exportHistoryPage.value > 1) {
+    return;
+  }
+  try {
+    const response = await listLogsExportJobs(currentWebsiteId.value, 1, exportHistoryPageSize);
+    const latest = response.jobs || [];
+    if (latest.length === 0) {
+      exportJobs.value = [];
+      exportHistoryHasMore.value = Boolean(response.has_more);
+      return;
+    }
+    const existingMap = new Map(exportJobs.value.map((job) => [job.id, job]));
+    const updated: LogsExportJob[] = [];
+    for (const job of latest) {
+      if (existingMap.has(job.id)) {
+        updated.push({ ...existingMap.get(job.id)!, ...job });
+      } else {
+        updated.push(job);
+      }
+    }
+    for (const job of exportJobs.value) {
+      if (!updated.find((item) => item.id === job.id)) {
+        updated.push(job);
+      }
+    }
+    exportJobs.value = updated;
+    exportHistoryHasMore.value = Boolean(response.has_more);
+    updateExportHistoryPolling();
+  } catch (error) {
+    console.debug('刷新导出任务失败:', error);
+  }
+}
+
+function bindExportHistoryScroll() {
+  if (exportHistoryScrollHandler || !exportHistoryTableRef.value) {
+    return;
+  }
+  const wrapper = exportHistoryTableRef.value.$el?.querySelector?.('.p-datatable-wrapper') as
+    | HTMLElement
+    | undefined;
+  if (!wrapper) {
+    return;
+  }
+  exportHistoryScrollHandler = () => {
+    if (!exportHistoryHasMore.value || exportHistoryLoadingMore.value) {
+      return;
+    }
+    const threshold = 40;
+    if (wrapper.scrollTop + wrapper.clientHeight >= wrapper.scrollHeight - threshold) {
+      loadMoreExportJobs();
+    }
+  };
+  wrapper.addEventListener('scroll', exportHistoryScrollHandler);
+}
+
+function unbindExportHistoryScroll() {
+  if (!exportHistoryScrollHandler || !exportHistoryTableRef.value) {
+    exportHistoryScrollHandler = null;
+    return;
+  }
+  const wrapper = exportHistoryTableRef.value.$el?.querySelector?.('.p-datatable-wrapper') as
+    | HTMLElement
+    | undefined;
+  if (wrapper) {
+    wrapper.removeEventListener('scroll', exportHistoryScrollHandler);
+  }
+  exportHistoryScrollHandler = null;
+}
+
+function startExportHistoryPolling() {
+  if (exportHistoryTimer) {
+    return;
+  }
+  exportHistoryTimer = setInterval(() => {
+    refreshExportJobsSilently();
+  }, 4000);
+  refreshExportJobsSilently();
+}
+
+function stopExportHistoryPolling() {
+  if (exportHistoryTimer) {
+    clearInterval(exportHistoryTimer);
+    exportHistoryTimer = null;
+  }
+}
+
+function updateExportHistoryPolling() {
+  if (!exportDialogVisible.value) {
+    stopExportHistoryPolling();
+    return;
+  }
+  if (exportHistoryPage.value > 1) {
+    stopExportHistoryPolling();
+    return;
+  }
+  const hasRunning = exportJobs.value.some((job) => job.status === 'running' || job.status === 'pending');
+  const currentActive =
+    exportJob.value?.status === 'running' || exportJob.value?.status === 'pending';
+  if (hasRunning || currentActive) {
+    startExportHistoryPolling();
+  } else {
+    stopExportHistoryPolling();
+  }
+}
+
+async function refreshCurrentExportStatus() {
+  if (!exportJob.value?.id) {
+    return;
+  }
+  try {
+    const status = await fetchLogsExportStatus(exportJob.value.id);
+    exportJob.value = status;
+    updateExportHistoryPolling();
+    if (status.status === 'success') {
+      stopExportPolling();
+      exportLoading.value = false;
+      await downloadExportJob(status.id, status.fileName);
+      await refreshExportJobs();
+    } else if (status.status === 'failed' || status.status === 'canceled') {
+      stopExportPolling();
+      exportLoading.value = false;
+      exportJobError.value = status.error || (status.status === 'canceled' ? t('logs.exportCanceled') : t('logs.exportError'));
+      await refreshExportJobs();
+    }
+  } catch (error) {
+    console.debug('读取导出状态失败:', error);
+  }
+}
+
+function startExportPolling() {
+  if (exportPollTimer) {
+    return;
+  }
+  exportPollTimer = setInterval(() => {
+    refreshCurrentExportStatus();
+  }, 1500);
+  refreshCurrentExportStatus();
+}
+
+function stopExportPolling() {
+  if (exportPollTimer) {
+    clearInterval(exportPollTimer);
+    exportPollTimer = null;
+  }
+}
+
+async function cancelExportJob() {
+  if (!exportJob.value?.id || exportCancelLoading.value) {
+    return;
+  }
+  exportCancelLoading.value = true;
+  try {
+    await cancelLogsExport(exportJob.value.id);
+    exportJob.value = { ...exportJob.value, status: 'canceled' };
+    exportJobError.value = t('logs.exportCanceled');
+    exportLoading.value = false;
+    stopExportPolling();
+    updateExportHistoryPolling();
+    await refreshExportJobs();
+  } catch (error) {
+    exportJobError.value = error instanceof Error ? error.message : t('logs.exportError');
+  } finally {
+    exportCancelLoading.value = false;
+  }
+}
+
+async function downloadExportJob(jobId: string, fallbackName?: string) {
+  const response = await downloadLogsExport(jobId);
+  const headerName = extractExportFileName(response.headers?.['content-disposition']);
+  const fileName = headerName || fallbackName || `nginxpulse_logs_${formatExportTimestamp()}.csv`;
+  const url = window.URL.createObjectURL(response.data);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
+
+function handleDownloadHistory(job: LogsExportJob) {
+  if (!job?.id || job.status !== 'success') {
+    return;
+  }
+  downloadExportJob(job.id, job.fileName);
+}
+
+async function handleRetryHistory(job: LogsExportJob) {
+  if (!job?.id || exportLoading.value) {
+    return;
+  }
+  exportLoading.value = true;
+  exportJobError.value = '';
+  try {
+    const start = await retryLogsExport(job.id);
+    exportJob.value = {
+      id: start.job_id,
+      status: start.status,
+      fileName: start.fileName,
+    };
+    exportDialogVisible.value = true;
+    startExportPolling();
+    await refreshExportJobs();
+  } catch (error) {
+    exportJobError.value = error instanceof Error ? error.message : t('logs.exportError');
     exportLoading.value = false;
   }
 }
@@ -888,6 +1513,9 @@ onMounted(() => {
 onUnmounted(() => {
   stopProgressPolling();
   unbindIPGeoIssueScroll();
+  stopExportPolling();
+  stopExportHistoryPolling();
+  unbindExportHistoryScroll();
 });
 
 watch(ipGeoIssueVisible, (visible) => {
@@ -895,6 +1523,60 @@ watch(ipGeoIssueVisible, (visible) => {
     setTimeout(() => bindIPGeoIssueScroll(), 0);
   } else {
     unbindIPGeoIssueScroll();
+  }
+});
+
+watch(exportDialogVisible, (visible) => {
+  if (visible) {
+    refreshExportJobs();
+    setTimeout(() => bindExportHistoryScroll(), 0);
+  } else {
+    stopExportHistoryPolling();
+    unbindExportHistoryScroll();
+  }
+});
+
+watch(dateRangePreset, (preset) => {
+  if (updatingDatePreset) {
+    return;
+  }
+  updatingDatePreset = true;
+  applyDatePreset(preset);
+  updatingDatePreset = false;
+  saveUserPreference('logsDatePreset', dateRangePreset.value || '');
+});
+
+watch(dateRange, (range) => {
+  if (updatingDateRange) {
+    return;
+  }
+  updatingDateRange = true;
+  const [start, end] = Array.isArray(range) ? range : [];
+  if (start) {
+    timeStart.value = formatDateTimeValue(startOfDay(start));
+  } else {
+    timeStart.value = '';
+  }
+  if (end) {
+    timeEnd.value = formatDateTimeValue(endOfDay(end));
+  } else {
+    timeEnd.value = '';
+  }
+  updatingDateRange = false;
+});
+
+watch([timeStart, timeEnd], ([start, end]) => {
+  if (!updatingDatePreset) {
+    if (!start && !end) {
+      dateRangePreset.value = 'all';
+    } else if (dateRangePreset.value !== 'custom') {
+      dateRangePreset.value = 'custom';
+    }
+  }
+  if (!updatingDateRange) {
+    updatingDateRange = true;
+    dateRange.value = buildDateRangeFromTime(start || '', end || '');
+    updatingDateRange = false;
   }
 });
 
@@ -921,7 +1603,7 @@ watch([ipParsing, parsingPending, ipGeoParsing, ipGeoPending, currentWebsiteId],
   }
 });
 
-watch([sortField, sortOrder, pageSize, excludeInternal, pageviewOnly, excludeSpider, excludeForeign, statusCodeFilter], () => {
+watch([sortField, sortOrder, pageSize, excludeInternal, pageviewOnly, excludeSpider, excludeForeign, statusCodeFilter, timeStart, timeEnd], () => {
   saveUserPreference('logsSortField', sortField.value);
   saveUserPreference('logsSortOrder', sortOrder.value);
   saveUserPreference('logsPageSize', String(pageSize.value));
@@ -929,7 +1611,9 @@ watch([sortField, sortOrder, pageSize, excludeInternal, pageviewOnly, excludeSpi
   saveUserPreference('logsPageviewOnly', pageviewOnly.value ? 'true' : 'false');
   saveUserPreference('logsExcludeSpider', excludeSpider.value ? 'true' : 'false');
   saveUserPreference('logsExcludeForeign', excludeForeign.value ? 'true' : 'false');
-  saveUserPreference('logsStatusCode', statusCodeFilter.value ? String(statusCodeFilter.value) : '');
+  saveUserPreference('logsStatusCode', statusCodeFilter.value || '');
+  saveUserPreference('logsTimeStart', timeStart.value || '');
+  saveUserPreference('logsTimeEnd', timeEnd.value || '');
   currentPage.value = 1;
   loadLogs();
 });
@@ -939,8 +1623,17 @@ function initPreferences() {
   pageviewOnly.value = getUserPreference('logsPageviewOnly', 'false') === 'true';
   excludeSpider.value = getUserPreference('logsExcludeSpider', 'false') === 'true';
   excludeForeign.value = getUserPreference('logsExcludeForeign', 'false') === 'true';
-  const savedStatusCode = Number(getUserPreference('logsStatusCode', ''));
-  statusCodeFilter.value = Number.isFinite(savedStatusCode) && savedStatusCode > 0 ? savedStatusCode : null;
+  statusCodeFilter.value = getUserPreference('logsStatusCode', '');
+  timeStart.value = getUserPreference('logsTimeStart', '');
+  timeEnd.value = getUserPreference('logsTimeEnd', '');
+  const savedPreset = getUserPreference('logsDatePreset', '');
+  if (savedPreset) {
+    dateRangePreset.value = savedPreset;
+  } else if (!timeStart.value && !timeEnd.value) {
+    dateRangePreset.value = 'all';
+  } else {
+    dateRangePreset.value = 'custom';
+  }
 }
 
 async function loadWebsites() {
@@ -972,7 +1665,9 @@ async function loadLogs() {
   }
   loading.value = true;
   try {
-    const statusCodeParam = resolveStatusCodeParam();
+    const { statusCode: statusCodeParam, statusClass: statusClassParam } = resolveStatusParams();
+    const timeStartParam = timeStart.value || undefined;
+    const timeEndParam = timeEnd.value || undefined;
     const result = await fetchLogs(
       currentWebsiteId.value,
       currentPage.value,
@@ -981,12 +1676,12 @@ async function loadLogs() {
       sortOrder.value,
       searchFilter.value,
       undefined,
-      undefined,
+      statusClassParam,
       statusCodeParam,
       excludeInternal.value,
       undefined,
-      undefined,
-      undefined,
+      timeStartParam,
+      timeEndParam,
       undefined,
       undefined,
       pageviewOnly.value,
@@ -1054,7 +1749,9 @@ async function refreshParsingStatus() {
   }
   progressPollInFlight = true;
   try {
-    const statusCodeParam = resolveStatusCodeParam();
+    const { statusCode: statusCodeParam, statusClass: statusClassParam } = resolveStatusParams();
+    const timeStartParam = timeStart.value || undefined;
+    const timeEndParam = timeEnd.value || undefined;
     const result = await fetchLogs(
       currentWebsiteId.value,
       currentPage.value,
@@ -1063,12 +1760,12 @@ async function refreshParsingStatus() {
       sortOrder.value,
       searchFilter.value,
       undefined,
-      undefined,
+      statusClassParam,
       statusCodeParam,
       excludeInternal.value,
       undefined,
-      undefined,
-      undefined,
+      timeStartParam,
+      timeEndParam,
       undefined,
       undefined,
       pageviewOnly.value,
@@ -1368,10 +2065,10 @@ function nextPage() {
 
 .control-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px 18px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 12px;
 }
 
 .logs-control-box :deep(.p-button),
@@ -1390,7 +2087,8 @@ function nextPage() {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex: 1 1 420px;
+  flex: 0 0 auto;
+  width: 100%;
   min-width: 320px;
   flex-wrap: wrap;
 }
@@ -1428,10 +2126,29 @@ function nextPage() {
 
 .filter-row-fields {
   gap: 16px;
-  margin-left: auto;
-  justify-content: flex-end;
+  margin-left: 0;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.filter-row-left,
+.filter-row-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-row-left {
   flex: 1 1 520px;
-  min-width: 320px;
+  min-width: 0;
+}
+
+.filter-row-right {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .filter-row-toggles {
@@ -1463,24 +2180,61 @@ function nextPage() {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
-  white-space: nowrap;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  white-space: normal;
 }
 
 .status-code-container label,
 .sort-field-container label,
 .sort-order-container label,
-.page-size-container label {
+.page-size-container label,
+.date-range-container label {
   font-size: 12px;
   color: var(--muted);
   font-weight: 600;
 }
 
 .status-code-input {
-  width: 110px;
+  width: 120px;
 }
 
 .status-code-input :deep(.p-inputtext) {
   font-size: 12px;
+}
+
+.status-code-quick {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.status-code-container:focus-within .status-code-quick {
+  display: flex;
+}
+
+.status-quick-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.status-quick-btn:hover {
+  border-color: rgba(var(--primary-color-rgb), 0.5);
+  color: var(--accent-color);
+}
+
+.status-quick-btn.active {
+  border-color: rgba(var(--primary-color-rgb), 0.8);
+  background: rgba(var(--primary-color-rgb), 0.12);
+  color: var(--accent-color);
 }
 
 .sort-field-container,
@@ -1491,6 +2245,41 @@ function nextPage() {
   gap: 8px;
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.date-range-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  white-space: normal;
+}
+
+.date-range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.date-range-select {
+  min-width: 120px;
+}
+
+.date-range-select :deep(.p-dropdown-label) {
+  font-size: 12px;
+}
+
+.date-range-picker {
+  width: 220px;
+}
+
+.date-range-picker :deep(.p-inputtext) {
+  width: 100%;
+  font-size: 12px;
 }
 
 .sort-select {
@@ -1800,6 +2589,29 @@ function nextPage() {
   font-weight: 600;
 }
 
+.export-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15);
+  overflow: hidden;
+}
+
+.export-progress-bar {
+  height: 100%;
+  background: rgba(59, 130, 246, 0.9);
+  transition: width 0.3s ease;
+}
+
+.export-status {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.export-table {
+  font-size: 13px;
+}
+
 .reparse-dialog-error {
   font-size: 13px;
   color: var(--error-color);
@@ -1826,7 +2638,7 @@ function nextPage() {
 
   .filter-row-fields {
     margin-left: 0;
-    justify-content: flex-start;
+    justify-content: space-between;
     flex: 0 0 auto;
     width: 100%;
   }
@@ -1848,7 +2660,19 @@ function nextPage() {
 
   .filter-row-fields {
     margin-left: 0;
+    flex-direction: column;
+    align-items: stretch;
     justify-content: flex-start;
+  }
+
+  .filter-row-left,
+  .filter-row-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .filter-row-right {
+    margin-left: 0;
   }
 
   .filter-row {

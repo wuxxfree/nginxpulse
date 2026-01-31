@@ -9,6 +9,9 @@ import type {
   ConfigValidationResult,
   RealtimeStats,
   IPGeoAnomalyResponse,
+  LogsExportStartResponse,
+  LogsExportStatusResponse,
+  LogsExportListResponse,
   SimpleSeriesStats,
   TimeSeriesStats,
   WebsiteInfo,
@@ -243,6 +246,53 @@ export const exportLogs = async (
 ): Promise<AxiosResponse<Blob>> =>
   client.get('/api/logs/export', {
     params: buildParams(params),
+    responseType: 'blob',
+  });
+
+export const startLogsExport = async (
+  params: Record<string, unknown> = {}
+): Promise<LogsExportStartResponse> => {
+  const response = await client.post<ApiResponse<LogsExportStartResponse>>('/api/logs/export', params);
+  return response.data;
+};
+
+export const fetchLogsExportStatus = async (jobId: string): Promise<LogsExportStatusResponse> => {
+  const response = await client.get<ApiResponse<LogsExportStatusResponse>>('/api/logs/export/status', {
+    params: buildParams({ id: jobId }),
+  });
+  return response.data;
+};
+
+export const listLogsExportJobs = async (
+  websiteId: string,
+  page = 1,
+  pageSize = 20
+): Promise<LogsExportListResponse> => {
+  const response = await client.get<ApiResponse<LogsExportListResponse>>('/api/logs/export/list', {
+    params: buildParams({ id: websiteId, page, pageSize }),
+  });
+  return response.data;
+};
+
+export const cancelLogsExport = async (jobId: string): Promise<{ status: string }> => {
+  const response = await client.post<ApiResponse<{ status: string }>>('/api/logs/export/cancel', {
+    id: jobId,
+  });
+  return response.data;
+};
+
+export const retryLogsExport = async (
+  jobId: string
+): Promise<LogsExportStartResponse> => {
+  const response = await client.post<ApiResponse<LogsExportStartResponse>>('/api/logs/export/retry', {
+    id: jobId,
+  });
+  return response.data;
+};
+
+export const downloadLogsExport = async (jobId: string): Promise<AxiosResponse<Blob>> =>
+  client.get('/api/logs/export/download', {
+    params: buildParams({ id: jobId }),
     responseType: 'blob',
   });
 

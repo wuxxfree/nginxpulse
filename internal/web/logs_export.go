@@ -15,11 +15,27 @@ import (
 const exportBatchSize = 1000
 const csvContentType = "text/csv; charset=utf-8"
 
+var ErrExportCanceled = fmt.Errorf("export canceled")
+
 func exportLogsCSV(
 	writer io.Writer,
 	statsFactory *analytics.StatsFactory,
 	query analytics.StatsQuery,
 	lang string,
+) error {
+	return exportLogsCSVWithProgress(writer, statsFactory, query, lang, nil, nil)
+}
+
+type exportProgressFunc func(processed, total int64)
+type exportCancelFunc func() bool
+
+func exportLogsCSVWithProgress(
+	writer io.Writer,
+	statsFactory *analytics.StatsFactory,
+	query analytics.StatsQuery,
+	lang string,
+	onProgress exportProgressFunc,
+	shouldCancel exportCancelFunc,
 ) error {
 	manager, ok := statsFactory.GetManager("logs")
 	if !ok {
@@ -37,7 +53,12 @@ func exportLogsCSV(
 		return err
 	}
 
+	var processed int64
+	var total int64
 	for page := 1; ; page++ {
+		if shouldCancel != nil && shouldCancel() {
+			return ErrExportCanceled
+		}
 		query.ExtraParam["page"] = page
 		query.ExtraParam["pageSize"] = exportBatchSize
 
@@ -53,11 +74,26 @@ func exportLogsCSV(
 			break
 		}
 
-		for _, log := range logsResult.Logs {
+		for i, log := range logsResult.Logs {
+			if shouldCancel != nil && i%200 == 0 && shouldCancel() {
+				return ErrExportCanceled
+			}
 			row := buildLogExportRow(log, normalizedLang)
 			if err := csvWriter.Write(row); err != nil {
 				return err
 			}
+		}
+		csvWriter.Flush()
+		if err := csvWriter.Error(); err != nil {
+			return err
+		}
+
+		processed += int64(len(logsResult.Logs))
+		if total == 0 && logsResult.Pagination.Total > 0 {
+			total = int64(logsResult.Pagination.Total)
+		}
+		if onProgress != nil {
+			onProgress(processed, total)
 		}
 
 		if logsResult.Pagination.Pages > 0 && page >= logsResult.Pagination.Pages {
@@ -65,7 +101,6 @@ func exportLogsCSV(
 		}
 	}
 
-	csvWriter.Flush()
 	return csvWriter.Error()
 }
 
