@@ -39,40 +39,44 @@
           </div>
         </div>
 
-        <section class="mobile-panel">
+        <section class="mobile-panel device-panel">
           <div class="mobile-panel-header">
             <div class="mobile-panel-title">{{ t('realtime.device') }}</div>
           </div>
-          <van-grid :column-num="3" :border="false">
-            <van-grid-item
-              v-for="item in deviceRows"
-              :key="item.label"
-            >
-              <div class="device-icon" :class="item.icon">
-                <svg v-if="item.icon === 'desktop'" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="3" y="5" width="18" height="11" rx="2" />
-                  <path d="M8 19h8" />
-                  <path d="M12 16v3" />
-                </svg>
-                <svg v-else-if="item.icon === 'mobile'" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="7" y="3" width="10" height="18" rx="2" />
-                  <circle cx="12" cy="17" r="1" />
-                </svg>
-                <svg v-else-if="item.icon === 'tablet'" viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="5" y="4" width="14" height="16" rx="2" />
-                  <circle cx="12" cy="17" r="1" />
-                </svg>
-                <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-                  <circle cx="12" cy="12" r="8" />
-                  <path d="M4 12h16" />
-                  <path d="M12 4v16" />
-                </svg>
-              </div>
-              <div class="metric-value">{{ item.value }}</div>
-              <div class="metric-label">{{ item.label }} · {{ item.percent }}</div>
-            </van-grid-item>
-          </van-grid>
-          <div v-if="deviceRows.length === 0" class="list-empty">{{ t('realtime.noData') }}</div>
+          <div class="device-grid-panel">
+            <van-grid :column-num="3" :border="false">
+              <van-grid-item
+                v-for="item in deviceRows"
+                :key="item.label"
+              >
+                <div class="device-icon" :class="item.icon">
+                  <svg v-if="item.icon === 'desktop'" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3" y="5" width="18" height="11" rx="2" />
+                    <path d="M8 19h8" />
+                    <path d="M12 16v3" />
+                  </svg>
+                  <svg v-else-if="item.icon === 'mobile'" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="7" y="3" width="10" height="18" rx="2" />
+                    <path d="M10 6h4" />
+                    <circle cx="12" cy="17" r="1" />
+                  </svg>
+                  <svg v-else-if="item.icon === 'tablet'" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="5" y="4" width="14" height="16" rx="2" />
+                    <circle cx="12" cy="17" r="1" />
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8" />
+                    <circle cx="9" cy="12" r="1" />
+                    <circle cx="12" cy="12" r="1" />
+                    <circle cx="15" cy="12" r="1" />
+                  </svg>
+                </div>
+                <div class="metric-value">{{ item.value }}</div>
+                <div class="metric-label">{{ item.label }} · {{ item.percent }}</div>
+              </van-grid-item>
+            </van-grid>
+            <div v-if="deviceRows.length === 0" class="list-empty">{{ t('realtime.noData') }}</div>
+          </div>
         </section>
 
         <van-tabs v-model:active="activeTab" animated class="mobile-tabs">
@@ -214,7 +218,7 @@ function resolveDeviceIcon(label: string) {
   if (lower.includes('pc') || lower.includes('desktop') || lower.includes('电脑')) {
     return 'desktop';
   }
-  if (lower.includes('mobile') || lower.includes('手机') || lower.includes('android') || lower.includes('ios')) {
+  if (lower.includes('mobile') || lower.includes('手机') || lower.includes('移动') || lower.includes('android') || lower.includes('ios')) {
     return 'mobile';
   }
   if (lower.includes('tablet') || lower.includes('pad') || lower.includes('平板')) {

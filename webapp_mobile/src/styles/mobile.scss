@@ -344,7 +344,7 @@ body.dark-mode .filter-trigger--date {
 
 .mobile-tabs .van-tabs__nav {
   background: rgba(255, 255, 255, 0.7);
-  border: 1px solid var(--mobile-border);
+  border: 0;
   border-radius: 16px;
   padding: 4px;
   box-shadow: var(--mobile-shadow-soft);
@@ -361,7 +361,8 @@ body.dark-mode .filter-trigger--date {
 
 .mobile-tabs .van-tab--active {
   color: var(--mobile-primary);
-  background: rgba(29, 107, 255, 0.14);
+  background: transparent;
+  font-weight: 700;
 }
 
 .mobile-tabs .van-tabs__line {
@@ -374,7 +375,7 @@ body.dark-mode .mobile-tabs .van-tabs__nav {
 }
 
 body.dark-mode .mobile-tabs .van-tab--active {
-  background: rgba(90, 162, 255, 0.18);
+  background: transparent;
 }
 
 .mobile-tabs .van-tabs__content,
@@ -881,6 +882,25 @@ body.dark-mode .method-pill {
 .device-icon.other {
   background: linear-gradient(135deg, #1e293b, #64748b);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.35);
+}
+
+.device-panel .device-grid-panel {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: var(--mobile-radius);
+  border: 1px solid var(--mobile-border);
+  padding: 8px 6px;
+  box-shadow: var(--mobile-shadow-soft);
+  overflow: hidden;
+}
+
+.device-panel .van-grid,
+.device-panel .van-grid-item__content {
+  background: transparent;
+}
+
+body.dark-mode .device-panel .device-grid-panel {
+  background: rgba(15, 23, 42, 0.8);
+  border-color: rgba(148, 163, 184, 0.18);
 }
 
 .mobile-tabbar {

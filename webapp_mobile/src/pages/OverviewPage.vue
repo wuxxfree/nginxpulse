@@ -79,6 +79,8 @@
               v-for="item in topPages"
               :key="item.label"
               :value="item.value"
+              clickable
+              @click="openTopPageDetail(item)"
             >
               <template #title>
                 <span class="list-title">
@@ -110,7 +112,26 @@
             </van-cell>
           </van-cell-group>
           <div v-if="topReferers.length === 0" class="list-empty">{{ t('common.noData') }}</div>
-        </section>
+    </section>
+
+    <van-popup
+      v-model:show="topPageDetailVisible"
+      position="bottom"
+      round
+      teleport="body"
+      class="log-detail-popup"
+    >
+      <div v-if="topPageDetail" class="log-detail-sheet">
+        <div class="log-detail-header">
+          <div class="log-detail-title">{{ t('overview.topPage') }}</div>
+          <van-icon name="cross" class="log-detail-close" @click="topPageDetailVisible = false" />
+        </div>
+        <div class="log-detail-path">{{ topPageDetail.label }}</div>
+        <div class="log-detail-tags">
+          <van-tag type="primary" round>{{ topPageDetail.value }}</van-tag>
+        </div>
+      </div>
+    </van-popup>
       </div>
     </div>
 
@@ -222,6 +243,8 @@ const topPages = computed(() => buildSeriesRows(urlStats.value));
 const topReferers = computed(() =>
   buildSeriesRows(refererStats.value, (label) => formatRefererLabel(label, currentLocale.value, t))
 );
+const topPageDetailVisible = ref(false);
+const topPageDetail = ref<{ label: string; value: string } | null>(null);
 
 function formatCount(value: number | string | undefined | null) {
   const num = Number(value || 0);
@@ -241,6 +264,11 @@ function onSelectRange(action: { value?: string }) {
   if (action?.value) {
     dateRange.value = action.value;
   }
+}
+
+function openTopPageDetail(item: { label: string; value: string }) {
+  topPageDetail.value = item;
+  topPageDetailVisible.value = true;
 }
 
 function buildSeriesRows(stats: SimpleSeriesStats | null, formatLabel?: (value: string) => string) {
