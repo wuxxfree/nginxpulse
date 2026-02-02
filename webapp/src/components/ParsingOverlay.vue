@@ -108,12 +108,14 @@ async function refresh() {
   try {
     const status = await fetchAppStatus();
     const parsing = Boolean(status.log_parsing);
+    const stage = typeof status.log_parsing_stage === 'string' ? status.log_parsing_stage : '';
+    const shouldShow = parsing && (stage === '' || stage === 'initial' || stage === 'reparse');
     const wasParsing = lastParsing === true;
     lastParsing = parsing;
 
-    setVisible(parsing);
-    progressPercent.value = parsing ? normalizeProgress(status.log_parsing_progress) : null;
-    estimatedRemainingSeconds.value = parsing
+    setVisible(shouldShow);
+    progressPercent.value = shouldShow ? normalizeProgress(status.log_parsing_progress) : null;
+    estimatedRemainingSeconds.value = shouldShow
       ? normalizeSeconds(status.log_parsing_estimated_remaining_seconds)
       : null;
 

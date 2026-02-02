@@ -58,6 +58,7 @@ func SetupRoutes(
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"log_parsing":                             ingest.IsIPParsing(),
+			"log_parsing_stage":                       ingest.GetLogParsingStage(),
 			"log_parsing_progress":                    ingest.GetIPParsingProgress(),
 			"log_parsing_estimated_total_seconds":     ingest.GetIPParsingEstimatedTotalSeconds(),
 			"log_parsing_estimated_remaining_seconds": ingest.GetIPParsingEstimatedRemainingSeconds(),

@@ -9,6 +9,7 @@ export interface WebsitesResponse {
 
 export interface AppStatusResponse {
   log_parsing: boolean;
+  log_parsing_stage?: string;
   log_parsing_progress?: number;
   log_parsing_estimated_total_seconds?: number;
   log_parsing_estimated_remaining_seconds?: number;

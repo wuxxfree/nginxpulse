@@ -80,6 +80,7 @@ type LogScanState struct {
 	LogMaxTs          int64                  `json:"log_max_ts,omitempty"`
 	RecentCutoffTs    int64                  `json:"recent_cutoff_ts,omitempty"`
 	BackfillPending   bool                   `json:"backfill_pending,omitempty"`
+	InitialParsed     bool                   `json:"initial_parsed,omitempty"`
 }
 
 type FileState struct {
@@ -321,6 +322,25 @@ func (p *LogParser) ensureWebsiteState(websiteID string) LogScanState {
 	return state
 }
 
+func (p *LogParser) hasUnparsedWebsite(websiteIDs []string) bool {
+	for _, id := range websiteIDs {
+		state, ok := p.states[id]
+		if !ok || !state.InitialParsed {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *LogParser) markInitialParsed(websiteID string) {
+	state := p.ensureWebsiteState(websiteID)
+	if state.InitialParsed {
+		return
+	}
+	state.InitialParsed = true
+	p.states[websiteID] = state
+}
+
 func (p *LogParser) getFileState(websiteID, filePath string) (FileState, bool) {
 	state, ok := p.states[websiteID]
 	if !ok || state.Files == nil {
@@ -546,12 +566,16 @@ func (p *LogParser) ScanNginxLogs() []ParserResult {
 	if p.demoMode {
 		return []ParserResult{}
 	}
-	if !startIPParsing() {
+	websiteIDs := config.GetAllWebsiteIDs()
+	stage := parseStagePeriodic
+	if p.hasUnparsedWebsite(websiteIDs) {
+		stage = parseStageInitial
+	}
+	if !startIPParsingWithStage(stage) {
 		return []ParserResult{}
 	}
 	defer finishIPParsing()
 
-	websiteIDs := config.GetAllWebsiteIDs()
 	return p.scanNginxLogsInternal(websiteIDs)
 }
 
@@ -560,7 +584,11 @@ func (p *LogParser) ScanNginxLogsForWebsite(websiteID string) []ParserResult {
 	if p.demoMode {
 		return []ParserResult{}
 	}
-	if !startIPParsing() {
+	stage := parseStagePeriodic
+	if p.hasUnparsedWebsite([]string{websiteID}) {
+		stage = parseStageInitial
+	}
+	if !startIPParsingWithStage(stage) {
 		return []ParserResult{}
 	}
 	defer finishIPParsing()
@@ -596,7 +624,7 @@ func (p *LogParser) TriggerReparse(websiteID string) error {
 		return nil
 	}
 
-	if !startIPParsing() {
+	if !startIPParsingWithStage(parseStageReparse) {
 		return ErrParsingInProgress
 	}
 
@@ -637,6 +665,7 @@ func (p *LogParser) scanNginxLogsInternal(websiteIDs []string) []ParserResult {
 
 		website, _ := config.GetWebsiteByID(id)
 		parserResult := EmptyParserResult(website.Name, id)
+		p.markInitialParsed(id)
 		if len(website.Sources) > 0 {
 			p.scanSources(id, website, &parserResult)
 		} else {
@@ -730,13 +759,14 @@ func (p *LogParser) scanableBytes(websiteID, logPath string) int64 {
 	return currentSize - startOffset
 }
 
-func startIPParsing() bool {
+func startIPParsingWithStage(stage parseStage) bool {
 	parsingMu.Lock()
 	defer parsingMu.Unlock()
 	if parsingMode != parseModeNone {
 		return false
 	}
 	parsingMode = parseModeForeground
+	setParseStage(stage)
 	resetParsingProgress()
 	return true
 }
@@ -747,6 +777,7 @@ func finishIPParsing() {
 		parsingMode = parseModeNone
 	}
 	parsingMu.Unlock()
+	resetParseStage()
 	finalizeParsingProgress()
 }
 
