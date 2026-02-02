@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,21 @@ type agentConfig struct {
 	PollInterval  string   `json:"pollInterval"`
 	BatchSize     int      `json:"batchSize"`
 	FlushInterval string   `json:"flushInterval"`
+	// RequestTimeout：推送日志时的 HTTP 请求超时（例如 "30s", "2m"）。
+	RequestTimeout string `json:"requestTimeout"`
+	// MaxPendingLines：内存中待发送缓冲区（pending）的最大积压行数；达到后会暂停继续读取新日志，直到积压被发送消化。
+	MaxPendingLines int `json:"maxPendingLines"`
+	// MaxLineBytes：单行日志的最大字节数（byte）。
+	// 超过该上限的行会被跳过（打印 warning），用于避免异常超长行导致巨大内存分配/容器 OOM。
+	// 默认：256KiB。
+	MaxLineBytes int `json:"maxLineBytes"`
+	// RetryBackoffMin：推送失败后的最小退避时间（例如 "1s"）。
+	RetryBackoffMin string `json:"retryBackoffMin"`
+	// RetryBackoffMax：连续失败时退避时间的最大上限（例如 "30s"）。
+	RetryBackoffMax string `json:"retryBackoffMax"`
+	// ExitOnMaxBackoff：当退避已达到 RetryBackoffMax 且再次推送仍失败时，是否直接退出进程（让 k8s 重启容器）。
+	// 默认：false。
+	ExitOnMaxBackoff bool `json:"exitOnMaxBackoff"`
 }
 
 type ingestRequest struct {
@@ -40,6 +57,18 @@ type fileState struct {
 	partial  string
 }
 
+type readStats struct {
+	path      string
+	from      int64
+	to        int64
+	fileSize  int64
+	lines     int
+	bytes     int64
+	hasPartial bool
+	skippedLines int
+	maxLineBytes int
+}
+
 func main() {
 	configPath := flag.String("config", "configs/nginxpulse_agent.json", "agent config path")
 	flag.Parse()
@@ -49,12 +78,24 @@ func main() {
 		logrus.WithError(err).Error("加载 agent 配置失败")
 		os.Exit(1)
 	}
+	applyEnvOverrides(cfg)
 
 	pollInterval := parseDuration(cfg.PollInterval, time.Second)
 	flushInterval := parseDuration(cfg.FlushInterval, 2*time.Second)
+	requestTimeout := parseDuration(cfg.RequestTimeout, 90*time.Second)
+	backoffMin := parseDuration(cfg.RetryBackoffMin, time.Second)
+	backoffMax := parseDuration(cfg.RetryBackoffMax, 30*time.Second)
 	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
 		batchSize = 200
+	}
+	maxPending := cfg.MaxPendingLines
+	if maxPending <= 0 {
+		maxPending = 5000
+	}
+	maxLineBytes := cfg.MaxLineBytes
+	if maxLineBytes <= 0 {
+		maxLineBytes = 256 * 1024
 	}
 	sourceID := strings.TrimSpace(cfg.SourceID)
 	if sourceID == "" {
@@ -64,6 +105,37 @@ func main() {
 	endpoint := strings.TrimRight(cfg.Server, "/") + "/api/ingest/logs"
 	states := make(map[string]*fileState)
 	pending := make([]string, 0, batchSize)
+	var (
+		nextPushAt    time.Time
+		failures      int
+		reachedMax    bool
+		lastErrLogged time.Time
+		lastMemLogged time.Time
+		lastReadLogged time.Time
+		lastPushLogged time.Time
+		lastBackpressureLogged time.Time
+	)
+	// 用于比较的“有效最大退避时间”（computeBackoff 在 max<=0 时会使用默认值）。
+	effectiveBackoffMax := backoffMax
+	if effectiveBackoffMax <= 0 {
+		effectiveBackoffMax = 30 * time.Second
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"endpoint":              endpoint,
+		"poll_interval":         pollInterval.String(),
+		"flush_interval":        flushInterval.String(),
+		"batch_size":            batchSize,
+		"max_pending_lines":     maxPending,
+		"max_line_bytes":        maxLineBytes,
+		"request_timeout":       requestTimeout.String(),
+		"retry_backoff_min":     backoffMin.String(),
+		"retry_backoff_max":     effectiveBackoffMax.String(),
+		"exit_on_max_backoff":   cfg.ExitOnMaxBackoff,
+		"paths":                 cfg.Paths,
+		"website_id":            cfg.WebsiteID,
+		"source_id":             sourceID,
+	}).Info("nginxpulse-agent: config loaded")
 
 	pollTicker := time.NewTicker(pollInterval)
 	flushTicker := time.NewTicker(flushInterval)
@@ -73,7 +145,23 @@ func main() {
 	for {
 		select {
 		case <-pollTicker.C:
+			// 背压：如果 pending 积压过大，则暂停读取，直到成功推送一部分数据。
+			if len(pending) >= maxPending {
+				if time.Since(lastBackpressureLogged) > 10*time.Second {
+					lastBackpressureLogged = time.Now()
+					logrus.WithFields(logrus.Fields{
+						"pending_lines":      len(pending),
+						"max_pending_lines":  maxPending,
+						"failures":           failures,
+						"next_push_in":       durationUntil(nextPushAt).Truncate(time.Millisecond).String(),
+					}).Warn("pending buffer is full; pausing reads")
+				}
+				continue
+			}
 			for _, path := range cfg.Paths {
+				if len(pending) >= maxPending {
+					break
+				}
 				if strings.HasSuffix(strings.ToLower(path), ".gz") {
 					continue
 				}
@@ -82,32 +170,132 @@ func main() {
 					state = &fileState{}
 					states[path] = state
 				}
-				lines, err := readNewLines(path, state)
+				lines, st, err := readNewLines(path, state, maxLineBytes)
 				if err != nil {
 					logrus.WithError(err).Warnf("读取日志失败: %s", path)
 					continue
 				}
-				if len(lines) == 0 {
+				if st.lines == 0 {
 					continue
+				}
+				// 大读取/周期性摘要日志：用于辅助定位 OOM 与积压问题。
+				if st.lines >= batchSize || st.bytes >= 4*1024*1024 || time.Since(lastReadLogged) > 30*time.Second {
+					lastReadLogged = time.Now()
+					logrus.WithFields(logrus.Fields{
+						"path":          st.path,
+						"lines":         st.lines,
+						"skipped_lines": st.skippedLines,
+						"max_line_bytes": st.maxLineBytes,
+						"bytes":         formatBytes(st.bytes),
+						"file_size":     formatBytes(st.fileSize),
+						"offset_from":   st.from,
+						"offset_to":     st.to,
+						"offset_delta":  st.to - st.from,
+						"has_partial":   st.hasPartial,
+						"pending_lines": len(pending),
+					}).Info("read new lines")
 				}
 				pending = append(pending, lines...)
 				if len(pending) >= batchSize {
-					if err := pushLines(endpoint, cfg.AccessKey, cfg.WebsiteID, sourceID, pending); err != nil {
-						logrus.WithError(err).Warn("日志推送失败，将在下次重试")
+					// 遵守退避窗口：在 backoff 时间内不进行推送尝试。
+					if !nextPushAt.IsZero() && time.Now().Before(nextPushAt) {
 						continue
 					}
-					pending = pending[:0]
+					if err := pushLines(requestTimeout, endpoint, cfg.AccessKey, cfg.WebsiteID, sourceID, pending); err != nil {
+						failures++
+						delay := computeBackoff(failures, backoffMin, backoffMax)
+						// 如果此前已达到最大退避，并且等待后依然失败，则按配置可选择直接退出进程。
+						if cfg.ExitOnMaxBackoff && reachedMax && delay >= effectiveBackoffMax {
+							logrus.WithError(err).Errorf("日志推送连续失败且退避已达上限 %s，终止 agent 进程", effectiveBackoffMax)
+							os.Exit(1)
+						}
+						nextPushAt = time.Now().Add(delay)
+						reachedMax = delay >= effectiveBackoffMax
+						// 避免刷屏：最多每 5 秒打印一次 warning。
+						if time.Since(lastErrLogged) > 5*time.Second {
+							lastErrLogged = time.Now()
+							logrus.WithError(err).Warnf("日志推送失败，将在 %s 后重试", time.Until(nextPushAt).Truncate(time.Millisecond))
+							logrus.WithFields(logrus.Fields{
+								"pending_lines":      len(pending),
+								"batch_size":         batchSize,
+								"failures":           failures,
+								"backoff_next":       delay.String(),
+								"backoff_max":        effectiveBackoffMax.String(),
+								"reached_max_backoff": reachedMax,
+							}).Warn("push failed (debug)")
+						}
+						continue
+					}
+					// 成功后：周期性打印推送摘要，方便观测吞吐与 pending 容量变化。
+					if time.Since(lastPushLogged) > 30*time.Second || failures > 0 {
+						lastPushLogged = time.Now()
+						logrus.WithFields(logrus.Fields{
+							"pushed_lines":     len(pending),
+							"pending_lines":    len(pending),
+							"pending_cap":      cap(pending),
+							"failures_reset":   failures,
+						}).Info("push succeeded")
+					}
+					pending = resetPending(pending, batchSize, maxPending)
+					failures = 0
+					reachedMax = false
+					nextPushAt = time.Time{}
 				}
+			}
+			// 周期性内存统计：用于与 OOMKilled 时间点对齐分析。
+			if time.Since(lastMemLogged) > 30*time.Second {
+				lastMemLogged = time.Now()
+				logMemStats("mem")
+				logrus.WithFields(logrus.Fields{
+					"pending_lines":     len(pending),
+					"batch_size":        batchSize,
+					"max_pending_lines": maxPending,
+					"failures":          failures,
+					"next_push_in":      durationUntil(nextPushAt).Truncate(time.Millisecond).String(),
+				}).Info("agent status")
 			}
 		case <-flushTicker.C:
 			if len(pending) == 0 {
 				continue
 			}
-			if err := pushLines(endpoint, cfg.AccessKey, cfg.WebsiteID, sourceID, pending); err != nil {
-				logrus.WithError(err).Warn("日志推送失败，将在下次重试")
+			if !nextPushAt.IsZero() && time.Now().Before(nextPushAt) {
 				continue
 			}
-			pending = pending[:0]
+			if err := pushLines(requestTimeout, endpoint, cfg.AccessKey, cfg.WebsiteID, sourceID, pending); err != nil {
+				failures++
+				delay := computeBackoff(failures, backoffMin, backoffMax)
+				if cfg.ExitOnMaxBackoff && reachedMax && delay >= effectiveBackoffMax {
+					logrus.WithError(err).Errorf("日志推送连续失败且退避已达上限 %s，终止 agent 进程", effectiveBackoffMax)
+					os.Exit(1)
+				}
+				nextPushAt = time.Now().Add(delay)
+				reachedMax = delay >= effectiveBackoffMax
+				if time.Since(lastErrLogged) > 5*time.Second {
+					lastErrLogged = time.Now()
+					logrus.WithError(err).Warnf("日志推送失败，将在 %s 后重试", time.Until(nextPushAt).Truncate(time.Millisecond))
+					logrus.WithFields(logrus.Fields{
+						"pending_lines":      len(pending),
+						"batch_size":         batchSize,
+						"failures":           failures,
+						"backoff_next":       delay.String(),
+						"backoff_max":        effectiveBackoffMax.String(),
+						"reached_max_backoff": reachedMax,
+					}).Warn("push failed on flush tick (debug)")
+				}
+				continue
+			}
+			if time.Since(lastPushLogged) > 30*time.Second || failures > 0 {
+				lastPushLogged = time.Now()
+				logrus.WithFields(logrus.Fields{
+					"pushed_lines":   len(pending),
+					"pending_cap":    cap(pending),
+					"trigger":        "flush_interval",
+				}).Info("push succeeded")
+			}
+			pending = resetPending(pending, batchSize, maxPending)
+			failures = 0
+			reachedMax = false
+			nextPushAt = time.Time{}
 		}
 	}
 }
@@ -139,61 +327,172 @@ func loadConfig(path string) (*agentConfig, error) {
 	return cfg, nil
 }
 
-func readNewLines(path string, state *fileState) ([]string, error) {
+func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, readStats, error) {
+	stats := readStats{path: path}
+	stats.maxLineBytes = maxLineBytes
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 	size := info.Size()
+	stats.fileSize = size
 	if size < state.offset {
 		state.offset = 0
 		state.partial = ""
 	}
 	if size == state.offset {
-		return nil, nil
+		return nil, stats, nil
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 	defer file.Close()
 
+	stats.from = state.offset
 	if _, err := file.Seek(state.offset, io.SeekStart); err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
-	reader := bufio.NewReader(file)
+	// Use ReadSlice-based line reading with a bounded line size to avoid huge allocations
+	// when input contains abnormally long lines.
+	reader := bufio.NewReaderSize(file, 64*1024)
 	lines := []string{}
+	seed := state.partial
+	state.partial = ""
+
+	var lastOverlongLogged time.Time
+	logOverlong := func(actualLineBytes int64, from, to int64) {
+		// avoid log spam if the input continuously produces overlong lines
+		if time.Since(lastOverlongLogged) < 5*time.Second {
+			return
+		}
+		lastOverlongLogged = time.Now()
+		logrus.WithFields(logrus.Fields{
+			"path":           path,
+			"max_line_bytes": maxLineBytes,
+			"line_bytes":     actualLineBytes,
+			"offset_from":    from,
+			"offset_to":      to,
+		}).Warn("skipping overlong log line (exceeds maxLineBytes)")
+	}
+
 	for {
-		line, err := reader.ReadString('\n')
-		if len(line) == 0 && err != nil {
+		line, overlong, bytesRead, hasNewline, eof, err, actualLineBytes := readOneLineLimited(reader, maxLineBytes, seed)
+		seed = ""
+		if bytesRead > 0 {
+			state.offset += bytesRead
+			stats.bytes += bytesRead
+		}
+		if err != nil {
+			return lines, stats, err
+		}
+		if bytesRead == 0 && eof {
 			break
 		}
-		state.offset += int64(len(line))
-		line = strings.TrimRight(line, "\r\n")
-		if state.partial != "" {
-			line = state.partial + line
-			state.partial = ""
+		if overlong {
+			stats.skippedLines++
+			logOverlong(actualLineBytes, state.offset-bytesRead, state.offset)
+			// Overlong line discarded; do not carry partial forward.
+			if eof && !hasNewline {
+				state.partial = ""
+				break
+			}
+			continue
 		}
-		if err == io.EOF {
+		if eof && !hasNewline {
+			// store bounded partial for next read
 			if line != "" {
 				state.partial = line
+				stats.hasPartial = true
 			}
 			break
 		}
 		if line != "" {
 			lines = append(lines, line)
-		}
-		if err != nil {
-			break
+			stats.lines++
 		}
 	}
 	state.lastSize = size
-	return lines, nil
+	stats.to = state.offset
+	return lines, stats, nil
 }
 
-func pushLines(endpoint, accessKey, websiteID, sourceID string, lines []string) error {
+// readOneLineLimited reads one logical line (terminated by '\n' or EOF) without ever buffering more than maxLineBytes.
+// It consumes the full line from reader. If the actual line length exceeds maxLineBytes, overlong=true and line content is discarded.
+// bytesRead counts the bytes consumed from reader for this line (including '\n' if present).
+// actualLineBytes reports the total bytes of the line content excluding trailing '\n' and '\r' (includes seed bytes).
+func readOneLineLimited(reader *bufio.Reader, maxLineBytes int, seed string) (line string, overlong bool, bytesRead int64, hasNewline bool, eof bool, err error, actualLineBytes int64) {
+	if maxLineBytes <= 0 {
+		maxLineBytes = 256 * 1024
+	}
+
+	var buf bytes.Buffer
+	if seed != "" {
+		// seed comes from previous EOF partial; it is already considered "line content"
+		if len(seed) > maxLineBytes {
+			overlong = true
+			actualLineBytes += int64(len(seed))
+		} else {
+			buf.WriteString(seed)
+			actualLineBytes += int64(len(seed))
+		}
+	}
+
+	tooLong := overlong
+	for {
+		frag, e := reader.ReadSlice('\n')
+		if len(frag) > 0 {
+			bytesRead += int64(len(frag))
+			// compute content bytes in this fragment (exclude trailing newline and optional CR before it)
+			contentLen := len(frag)
+			if frag[len(frag)-1] == '\n' {
+				contentLen--
+				hasNewline = true
+				if contentLen > 0 && frag[contentLen-1] == '\r' {
+					contentLen--
+				}
+			}
+			if contentLen < 0 {
+				contentLen = 0
+			}
+			actualLineBytes += int64(contentLen)
+
+			if !tooLong && contentLen > 0 {
+				remain := maxLineBytes - buf.Len()
+				if remain <= 0 {
+					tooLong = true
+				} else if contentLen <= remain {
+					buf.Write(frag[:contentLen])
+				} else {
+					buf.Write(frag[:remain])
+					tooLong = true
+				}
+			}
+		}
+
+		if e == nil {
+			break
+		}
+		if errors.Is(e, bufio.ErrBufferFull) {
+			// continue reading more fragments of the same line
+			continue
+		}
+		if e == io.EOF {
+			eof = true
+			break
+		}
+		return "", false, bytesRead, hasNewline, eof, e, actualLineBytes
+	}
+
+	if tooLong {
+		return "", true, bytesRead, hasNewline, eof, nil, actualLineBytes
+	}
+	return buf.String(), false, bytesRead, hasNewline, eof, nil, actualLineBytes
+}
+
+func pushLines(timeout time.Duration, endpoint, accessKey, websiteID, sourceID string, lines []string) error {
 	payload := ingestRequest{
 		WebsiteID: websiteID,
 		SourceID:  sourceID,
@@ -213,7 +512,7 @@ func pushLines(endpoint, accessKey, websiteID, sourceID string, lines []string) 
 		req.Header.Set("X-NginxPulse-Key", strings.TrimSpace(accessKey))
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -235,4 +534,126 @@ func parseDuration(raw string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func applyEnvOverrides(cfg *agentConfig) {
+	if cfg == nil {
+		return
+	}
+	// 说明：配置文件为主，环境变量可覆盖（便于 k8s/daemonset 管理）。
+	// 仅覆盖可选项，不覆盖 server/website 等必填项（避免误配置导致 agent 启动失败）。
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_POLL_INTERVAL"); ok && strings.TrimSpace(v) != "" {
+		cfg.PollInterval = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_FLUSH_INTERVAL"); ok && strings.TrimSpace(v) != "" {
+		cfg.FlushInterval = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_BATCH_SIZE"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.BatchSize = n
+		}
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_REQUEST_TIMEOUT"); ok && strings.TrimSpace(v) != "" {
+		cfg.RequestTimeout = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_MAX_PENDING_LINES"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.MaxPendingLines = n
+		}
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_MAX_LINE_BYTES"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.MaxLineBytes = n
+		}
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_RETRY_BACKOFF_MIN"); ok && strings.TrimSpace(v) != "" {
+		cfg.RetryBackoffMin = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_RETRY_BACKOFF_MAX"); ok && strings.TrimSpace(v) != "" {
+		cfg.RetryBackoffMax = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_EXIT_ON_MAX_BACKOFF"); ok && strings.TrimSpace(v) != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			cfg.ExitOnMaxBackoff = b
+		}
+	}
+}
+
+func computeBackoff(failures int, min, max time.Duration) time.Duration {
+	if failures <= 0 {
+		return min
+	}
+	if min <= 0 {
+		min = time.Second
+	}
+	if max <= 0 {
+		max = 30 * time.Second
+	}
+	// 指数退避并封顶：min * 2^(failures-1)，最大不超过 max。
+	delay := min
+	for i := 1; i < failures; i++ {
+		if delay >= max {
+			return max
+		}
+		delay *= 2
+	}
+	if delay > max {
+		delay = max
+	}
+	return delay
+}
+
+func logMemStats(prefix string) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	logrus.WithFields(logrus.Fields{
+		"heap_alloc":  formatBytes(int64(m.HeapAlloc)),
+		"heap_inuse":  formatBytes(int64(m.HeapInuse)),
+		"heap_sys":    formatBytes(int64(m.HeapSys)),
+		"stack_inuse": formatBytes(int64(m.StackInuse)),
+		"sys":         formatBytes(int64(m.Sys)),
+		"num_gc":      m.NumGC,
+		"gc_pause_ms": time.Duration(m.PauseTotalNs).Milliseconds(),
+	}).Info(prefix)
+}
+
+func durationUntil(t time.Time) time.Duration {
+	if t.IsZero() {
+		return 0
+	}
+	d := time.Until(t)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func formatBytes(v int64) string {
+	if v < 0 {
+		v = 0
+	}
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case v >= gb:
+		return fmt.Sprintf("%.2fGiB", float64(v)/float64(gb))
+	case v >= mb:
+		return fmt.Sprintf("%.2fMiB", float64(v)/float64(mb))
+	case v >= kb:
+		return fmt.Sprintf("%.2fKiB", float64(v)/float64(kb))
+	default:
+		return fmt.Sprintf("%dB", v)
+	}
+}
+
+// resetPending 用于释放 pending slice 持有的引用。
+// 这里采用“始终换新 slice”的策略：每次推送成功后都丢弃旧的底层数组，
+// 让 GC 更容易回收历史积压/异常输入导致的内存占用，从而抑制 heap_sys 长期走高。
+func resetPending(pending []string, batchSize, maxPending int) []string {
+	_ = pending
+	_ = maxPending
+	return make([]string, 0, batchSize)
 }
