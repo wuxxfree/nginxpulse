@@ -753,7 +753,7 @@ func isISPLabel(value string) bool {
 		}
 	}
 	ispKeywords := []string{
-		"电信", "联通", "移动", "铁通", "广电", "网通", "教育网", "长城宽带", "有线", "鹏博士", "阿里",
+		"电信", "联通", "移动", "铁通", "广电", "网通", "教育网", "长城宽带", "有线", "鹏博士",
 	}
 	for _, keyword := range ispKeywords {
 		if strings.Contains(clean, keyword) {

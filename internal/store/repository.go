@@ -461,7 +461,7 @@ func (r *Repository) detectIPGeoAnomaliesForWebsite(websiteID string, limit int)
 }
 
 var ipGeoAnomalyKeywords = []string{
-	"电信", "联通", "移动", "铁通", "广电", "网通", "教育网", "长城宽带", "有线", "鹏博士", "阿里",
+	"电信", "联通", "移动", "铁通", "广电", "网通", "教育网", "长城宽带", "有线", "鹏博士",
 }
 
 func isIPGeoAnomalyLabel(value string) bool {
@@ -640,6 +640,14 @@ func (r *Repository) batchInsertLogsForWebsiteOnce(websiteID string, logs []Ngin
 		return err
 	}
 	defer firstSeenStmt.Close()
+	lockFirstSeenStmt, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`SELECT pg_advisory_xact_lock(hashtext('%s:first_seen'), hashint8(?))`,
+		websiteID,
+	)))
+	if err != nil {
+		return err
+	}
+	defer lockFirstSeenStmt.Close()
 	sessions, err := prepareSessionStatements(tx, websiteID)
 	if err != nil {
 		return err
@@ -660,6 +668,13 @@ func (r *Repository) batchInsertLogsForWebsiteOnce(websiteID string, logs []Ngin
 	cache := newDimCaches()
 	aggBatch := newAggBatch()
 	sessionCache := make(map[string]sessionState)
+	// 会话聚合：在事务内先累加，提交前收敛落库，避免每条新会话都去争抢同一天聚合行。
+	sessionAggDaily := make(map[string]int64)
+	sessionAggEntry := make(map[string]map[int64]int64)
+	// 会话更新/状态：在事务内先累加，提交前按稳定顺序落库，避免在维表写入/锁等待期间提前持有 sessions 行锁。
+	sessionUpdates := make(map[int64]*pendingSessionUpdate)
+	sessionStateUpserts := make(map[string]pendingSessionStateUpsert)
+	lockedSessionKeys := make(map[string]struct{})
 	// 将 first_seen 的写入从“每条日志一次 upsert”改为“本批次去重后按 ip_id 顺序写入”，降低死锁概率与锁竞争。
 	firstSeenMinTs := make(map[int64]int64)
 
@@ -722,6 +737,11 @@ func (r *Repository) batchInsertLogsForWebsiteOnce(websiteID string, logs []Ngin
 			if err := updateSessionFromLog(
 				sessions,
 				sessionCache,
+				sessionAggDaily,
+				sessionAggEntry,
+				sessionUpdates,
+				sessionStateUpserts,
+				lockedSessionKeys,
 				ipID,
 				uaID,
 				locationID,
@@ -743,6 +763,9 @@ func (r *Repository) batchInsertLogsForWebsiteOnce(websiteID string, logs []Ngin
 		}
 		sort.Slice(ipIDs, func(i, j int) bool { return ipIDs[i] < ipIDs[j] })
 		for _, ipID := range ipIDs {
+			if _, err := lockFirstSeenStmt.Exec(ipID); err != nil {
+				return err
+			}
 			if _, err := firstSeenStmt.Exec(ipID, firstSeenMinTs[ipID]); err != nil {
 				return err
 			}
@@ -750,6 +773,19 @@ func (r *Repository) batchInsertLogsForWebsiteOnce(websiteID string, logs []Ngin
 	}
 
 	if err := applyAggUpdates(aggs, aggBatch); err != nil {
+		return err
+	}
+
+	// 在提交前的收敛阶段一次性写入会话聚合，并在每个 day 上使用 advisory lock 将并发写串行化（避免死锁）。
+	if err := applySessionAggUpdatesWithLocks(sessions, sessionAggDaily, sessionAggEntry); err != nil {
+		return err
+	}
+
+	// 会话 UPDATE / session_state upsert：收敛到事务末尾一次性落库，尽量缩短 sessions 行锁持有时间。
+	if err := applySessionUpdates(sessions, sessionUpdates); err != nil {
+		return err
+	}
+	if err := applySessionStateUpserts(sessions, sessionStateUpserts); err != nil {
 		return err
 	}
 
@@ -1149,6 +1185,8 @@ type sessionStatements struct {
 	upsertState      *sql.Stmt
 	insertSession    *sql.Stmt
 	updateSession    *sql.Stmt
+	lockSessionKey      *sql.Stmt
+	lockAggSessionDaily *sql.Stmt
 	upsertDaily      *sql.Stmt
 	upsertEntryDaily *sql.Stmt
 }
@@ -1171,6 +1209,19 @@ type aggBatch struct {
 }
 
 type sessionState struct {
+	sessionID int64
+	lastTs    int64
+}
+
+type pendingSessionUpdate struct {
+	endTs          int64
+	exitURLID      int64
+	pageCountDelta int64
+}
+
+type pendingSessionStateUpsert struct {
+	ipID      int64
+	uaID      int64
 	sessionID int64
 	lastTs    int64
 }
@@ -1236,6 +1287,8 @@ func (s *sessionStatements) Close() {
 	closeStmt(s.upsertState)
 	closeStmt(s.insertSession)
 	closeStmt(s.updateSession)
+	closeStmt(s.lockSessionKey)
+	closeStmt(s.lockAggSessionDaily)
 	closeStmt(s.upsertDaily)
 	closeStmt(s.upsertEntryDaily)
 }
@@ -1487,7 +1540,7 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 	}
 
 	updateSession, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
-		`UPDATE "%s" SET end_ts = ?, exit_url_id = ?, page_count = page_count + 1 WHERE id = ?`, sessionTable,
+		`UPDATE "%s" SET end_ts = ?, exit_url_id = ?, page_count = page_count + ? WHERE id = ?`, sessionTable,
 	)))
 	if err != nil {
 		insertSession.Close()
@@ -1496,11 +1549,9 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 		return nil, err
 	}
 
-	upsertDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
-		`INSERT INTO "%s" (day, sessions)
-         VALUES (?, 1)
-         ON CONFLICT (day) DO UPDATE SET
-             sessions = "%s".sessions + 1`, dailyTable, dailyTable,
+	lockSessionKey, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`SELECT pg_advisory_xact_lock(hashtext('%s:session'), (hashint8(?) # hashint8(?)))`,
+		websiteID,
 	)))
 	if err != nil {
 		updateSession.Close()
@@ -1510,14 +1561,45 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 		return nil, err
 	}
 
+	lockAggSessionDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`SELECT pg_advisory_xact_lock(hashtext('%s:agg_session_daily'), hashtext(?))`,
+		websiteID,
+	)))
+	if err != nil {
+		lockSessionKey.Close()
+		updateSession.Close()
+		insertSession.Close()
+		upsertState.Close()
+		selectState.Close()
+		return nil, err
+	}
+
+	upsertDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
+		`INSERT INTO "%s" (day, sessions)
+         VALUES (?, ?)
+         ON CONFLICT (day) DO UPDATE SET
+             sessions = "%s".sessions + excluded.sessions`, dailyTable, dailyTable,
+	)))
+	if err != nil {
+		lockAggSessionDaily.Close()
+		lockSessionKey.Close()
+		updateSession.Close()
+		insertSession.Close()
+		upsertState.Close()
+		selectState.Close()
+		return nil, err
+	}
+
 	upsertEntryDaily, err := tx.Prepare(sqlutil.ReplacePlaceholders(fmt.Sprintf(
 		`INSERT INTO "%s" (day, entry_url_id, count)
-         VALUES (?, ?, 1)
+         VALUES (?, ?, ?)
          ON CONFLICT (day, entry_url_id) DO UPDATE SET
-             count = "%s".count + 1`, entryTable, entryTable,
+             count = "%s".count + excluded.count`, entryTable, entryTable,
 	)))
 	if err != nil {
 		upsertDaily.Close()
+		lockAggSessionDaily.Close()
+		lockSessionKey.Close()
 		updateSession.Close()
 		insertSession.Close()
 		upsertState.Close()
@@ -1530,9 +1612,124 @@ func prepareSessionStatements(tx *sql.Tx, websiteID string) (*sessionStatements,
 		upsertState:      upsertState,
 		insertSession:    insertSession,
 		updateSession:    updateSession,
+		lockSessionKey:      lockSessionKey,
+		lockAggSessionDaily: lockAggSessionDaily,
 		upsertDaily:      upsertDaily,
 		upsertEntryDaily: upsertEntryDaily,
 	}, nil
+}
+
+func applySessionAggUpdatesWithLocks(
+	stmts *sessionStatements,
+	sessionAggDaily map[string]int64,
+	sessionAggEntry map[string]map[int64]int64,
+) error {
+	if stmts == nil {
+		return nil
+	}
+	if len(sessionAggDaily) == 0 && len(sessionAggEntry) == 0 {
+		return nil
+	}
+
+	daySet := make(map[string]struct{}, len(sessionAggDaily)+len(sessionAggEntry))
+	for day := range sessionAggDaily {
+		daySet[day] = struct{}{}
+	}
+	for day := range sessionAggEntry {
+		daySet[day] = struct{}{}
+	}
+	days := make([]string, 0, len(daySet))
+	for day := range daySet {
+		days = append(days, day)
+	}
+	sort.Strings(days)
+
+	for _, day := range days {
+		// 关键：按天加 advisory lock，确保不同事务对同一天聚合行的写入串行化，避免死锁。
+		// 这里是“收敛阶段”才加锁，锁持有时间最短（只覆盖聚合落库这几条语句）。
+		if stmts.lockAggSessionDaily != nil {
+			if _, err := stmts.lockAggSessionDaily.Exec(day); err != nil {
+				return err
+			}
+		}
+
+		if stmts.upsertDaily != nil {
+			if delta := sessionAggDaily[day]; delta > 0 {
+				if _, err := stmts.upsertDaily.Exec(day, delta); err != nil {
+					return err
+				}
+			}
+		}
+
+		if stmts.upsertEntryDaily != nil {
+			entryDelta := sessionAggEntry[day]
+			if len(entryDelta) > 0 {
+				entryIDs := make([]int64, 0, len(entryDelta))
+				for entryID := range entryDelta {
+					entryIDs = append(entryIDs, entryID)
+				}
+				sort.Slice(entryIDs, func(i, j int) bool { return entryIDs[i] < entryIDs[j] })
+				for _, entryID := range entryIDs {
+					delta := entryDelta[entryID]
+					if delta <= 0 {
+						continue
+					}
+					if _, err := stmts.upsertEntryDaily.Exec(day, entryID, delta); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func applySessionUpdates(
+	stmts *sessionStatements,
+	updates map[int64]*pendingSessionUpdate,
+) error {
+	if stmts == nil || stmts.updateSession == nil || len(updates) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(updates))
+	for id := range updates {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		upd := updates[id]
+		if upd == nil || upd.pageCountDelta <= 0 {
+			continue
+		}
+		if _, err := stmts.updateSession.Exec(upd.endTs, upd.exitURLID, upd.pageCountDelta, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySessionStateUpserts(
+	stmts *sessionStatements,
+	upserts map[string]pendingSessionStateUpsert,
+) error {
+	if stmts == nil || stmts.upsertState == nil || len(upserts) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(upserts))
+	for k := range upserts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		u := upserts[k]
+		if u.ipID == 0 || u.uaID == 0 || u.sessionID == 0 || u.lastTs == 0 {
+			continue
+		}
+		if _, err := stmts.upsertState.Exec(u.ipID, u.uaID, u.sessionID, u.lastTs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func applyAggUpdates(aggs *aggStatements, batch *aggBatch) error {
@@ -1842,6 +2039,11 @@ func addCounts(counts *aggCounts, log NginxLogRecord) {
 func updateSessionFromLog(
 	stmts *sessionStatements,
 	cache map[string]sessionState,
+	sessionAggDaily map[string]int64,
+	sessionAggEntry map[string]map[int64]int64,
+	sessionUpdates map[int64]*pendingSessionUpdate,
+	sessionStateUpserts map[string]pendingSessionStateUpsert,
+	lockedSessionKeys map[string]struct{},
 	ipID,
 	uaID,
 	locationID,
@@ -1852,6 +2054,17 @@ func updateSessionFromLog(
 		return nil
 	}
 	key := fmt.Sprintf("%d|%d", ipID, uaID)
+
+	// 关键：按 (ip_id, ua_id) 串行化会话写入，避免多个并发事务同时更新同一会话链路导致 tuple/transactionid 锁等待甚至死锁。
+	if stmts.lockSessionKey != nil && lockedSessionKeys != nil {
+		if _, ok := lockedSessionKeys[key]; !ok {
+			if _, err := stmts.lockSessionKey.Exec(ipID, uaID); err != nil {
+				return err
+			}
+			lockedSessionKeys[key] = struct{}{}
+		}
+	}
+
 	state, ok := cache[key]
 	if !ok {
 		var sessionID int64
@@ -1880,26 +2093,42 @@ func updateSessionFromLog(
 			return err
 		}
 		day := dayBucket(time.Unix(timestamp, 0))
-		if stmts.upsertDaily != nil {
-			if _, err := stmts.upsertDaily.Exec(day); err != nil {
-				return err
-			}
+		// 不在这里直接 upsert 聚合，避免高并发下反复争抢同一天的聚合行。
+		// 改为“内存累加”，在事务提交前的收敛阶段一次性落库，并用 advisory lock 按天串行化。
+		if sessionAggDaily != nil {
+			sessionAggDaily[day]++
 		}
-		if stmts.upsertEntryDaily != nil {
-			if _, err := stmts.upsertEntryDaily.Exec(day, urlID); err != nil {
-				return err
+		if sessionAggEntry != nil {
+			if sessionAggEntry[day] == nil {
+				sessionAggEntry[day] = make(map[int64]int64)
 			}
+			sessionAggEntry[day][urlID]++
 		}
 		state = sessionState{sessionID: sessionID, lastTs: timestamp}
 	} else {
-		if _, err := stmts.updateSession.Exec(timestamp, urlID, state.sessionID); err != nil {
-			return err
+		// 不在循环里直接 UPDATE sessions：避免后续维表 INSERT/锁等待期间提前持有 session 行锁。
+		// 这里改为按 session_id 累加更新：end_ts 取最后一次的 timestamp，exit_url_id 取最后一次 url_id，page_count 增量累加。
+		if sessionUpdates != nil {
+			upd := sessionUpdates[state.sessionID]
+			if upd == nil {
+				upd = &pendingSessionUpdate{}
+				sessionUpdates[state.sessionID] = upd
+			}
+			upd.endTs = timestamp
+			upd.exitURLID = urlID
+			upd.pageCountDelta++
 		}
 		state.lastTs = timestamp
 	}
 
-	if _, err := stmts.upsertState.Exec(ipID, uaID, state.sessionID, state.lastTs); err != nil {
-		return err
+	// session_state 同理：收敛到事务末尾一次性 upsert，降低写放大与锁竞争。
+	if sessionStateUpserts != nil {
+		sessionStateUpserts[key] = pendingSessionStateUpsert{
+			ipID:      ipID,
+			uaID:      uaID,
+			sessionID: state.sessionID,
+			lastTs:    state.lastTs,
+		}
 	}
 	cache[key] = state
 	return nil

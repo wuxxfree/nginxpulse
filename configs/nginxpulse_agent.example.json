@@ -1,0 +1,47 @@
+{
+  // nginxpulse-server 的访问地址（注意包含端口 8089）
+  // 例如集群内： http://nginxpulse-server.monitoring.svc:8089
+  "server": "http://nginxpulse-server.monitoring.svc:8089",
+
+  // 可选：如果 server 侧启用了 access key，则填这里
+  "accessKey": "",
+
+  // 必填：站点 ID（对应 nginxpulse 的网站配置/后台生成的 ID）
+  "websiteID": "1207",
+
+  // 可选：来源 ID（建议填，便于区分不同 agent）
+  "sourceID": "agent-ingress",
+
+  // 必填：要采集的日志文件路径列表（容器内路径）
+  // 说明：当前 agent 会跳过 .gz 文件
+  "paths": [
+    "/data/nginxpulse/ingress-json.log"
+  ],
+
+  // 轮询间隔：多久读一次“新增内容”
+  "pollInterval": "20s",
+
+  // 批大小：pending 累积到多少行就尝试推送一次
+  "batchSize": 1000,
+
+  // 刷新间隔：即便没到 batchSize，也会按这个间隔尝试推送 pending
+  "flushInterval": "40s",
+
+  // 推送请求超时
+  "requestTimeout": "50m",
+
+  // pending 最大积压行数：到达后暂停继续读取（背压）
+  "maxPendingLines": 1000,
+
+  // 单行最大长度（字节）：超过会丢弃并打印 warning（防止超长行导致 OOM）
+  // 默认 256KiB；建议 ingress-json 这种场景可以先 256KiB 或 1MiB
+  "maxLineBytes": 262144,
+
+  // 失败重试退避（指数退避）
+  "retryBackoffMin": "1s",
+  "retryBackoffMax": "30s",
+
+  // 可选：达到最大退避后仍失败则退出进程（用于让 k8s 重启容器）
+  // 默认 false，建议先 false，确认网络/服务端稳定后再考虑打开
+  "exitOnMaxBackoff": false
+}
