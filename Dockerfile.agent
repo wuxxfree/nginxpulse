@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+
+FROM golang:1.24.0-alpine AS builder
+
+WORKDIR /src
+RUN apk add --no-cache ca-certificates git
+
+COPY go.mod go.sum ./
+
+# 可选：构建时允许通过参数覆盖 GOPROXY（适用于企业内网代理/镜像源）。
+ARG GOPROXY
+RUN if [ -n "${GOPROXY:-}" ]; then go env -w GOPROXY="${GOPROXY}"; fi && go mod download
+
+COPY . .
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-$(go env GOOS)} \
+    GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -trimpath -ldflags="-s -w" -o /out/nginxpulse-agent ./cmd/nginxpulse-agent
+
+FROM alpine:3.20 AS runtime
+
+WORKDIR /app
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -S -D -H -u 10001 nginxpulse-agent
+
+COPY --from=builder /out/nginxpulse-agent /app/nginxpulse-agent
+RUN chmod +x /app/nginxpulse-agent
+
+USER 10001
+ENTRYPOINT ["/app/nginxpulse-agent"]
+CMD ["-config", "/etc/nginxpulse/agent.json"]
+
