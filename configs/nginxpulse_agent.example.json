@@ -27,6 +27,13 @@
   // 刷新间隔：即便没到 batchSize，也会按这个间隔尝试推送 pending
   "flushInterval": "40s",
 
+  // 首次读取限制：
+  // - 默认行为（推荐）：只从文件尾部读取最近 N 字节，避免首次启动就“回放历史日志”把 server/pgsql 打爆
+  // - 设为 <0：禁用 tail（从文件头开始读，全量回放）
+  "initialTailBytes": 8388608,
+  // 首次读取最多读多少行（可选；0 表示不额外限制，仍受 maxPendingLines 限制）
+  "initialMaxLines": 0,
+
   // 推送请求超时
   "requestTimeout": "50m",
 

@@ -28,6 +28,16 @@ type agentConfig struct {
 	PollInterval  string   `json:"pollInterval"`
 	BatchSize     int      `json:"batchSize"`
 	FlushInterval string   `json:"flushInterval"`
+	// InitialTailBytes：首次读取某个文件时（offset=0），如果文件很大，则只从文件尾部读取最近 N 字节。
+	// 目的：避免 agent 第一次启动就把历史日志全量推送，导致 server/pgsql 被打爆。
+	// 约定：
+	// - 0：使用默认值（8MiB）
+	// - >0：使用指定值
+	// - <0：禁用 tail（从文件头开始读，兼容“全量回放”诉求）
+	InitialTailBytes int64 `json:"initialTailBytes"`
+	// InitialMaxLines：首次读取某个文件时（offset=0），最多读取多少行。
+	// 设为 0 表示不额外限制（仍会受 maxPendingLines 限制）。
+	InitialMaxLines int `json:"initialMaxLines"`
 	// RequestTimeout：推送日志时的 HTTP 请求超时（例如 "30s", "2m"）。
 	RequestTimeout string `json:"requestTimeout"`
 	// MaxPendingLines：内存中待发送缓冲区（pending）的最大积压行数；达到后会暂停继续读取新日志，直到积压被发送消化。
@@ -97,6 +107,25 @@ func main() {
 	if maxLineBytes <= 0 {
 		maxLineBytes = 256 * 1024
 	}
+	initialTailBytes := cfg.InitialTailBytes
+	// 默认：只从尾部读一小段，避免首次启动灌入历史日志。
+	// 说明：
+	// - initialTailBytes == 0：使用默认值（8MiB）
+	// - initialTailBytes  > 0：使用指定值
+	// - initialTailBytes  < 0：禁用 tail（从文件头开始读）
+	if initialTailBytes == 0 {
+		initialTailBytes = 8 * 1024 * 1024
+	} else if initialTailBytes < 0 {
+		initialTailBytes = 0
+	}
+	if initialTailBytes != 0 && initialTailBytes < 1*1024*1024 {
+		// 给一个下限，避免配置过小导致频繁从中间切入且有效行过少
+		initialTailBytes = 1 * 1024 * 1024
+	}
+	initialMaxLines := cfg.InitialMaxLines
+	if initialMaxLines < 0 {
+		initialMaxLines = 0
+	}
 	sourceID := strings.TrimSpace(cfg.SourceID)
 	if sourceID == "" {
 		sourceID = "agent"
@@ -128,6 +157,8 @@ func main() {
 		"batch_size":            batchSize,
 		"max_pending_lines":     maxPending,
 		"max_line_bytes":        maxLineBytes,
+		"initial_tail_bytes":    initialTailBytes,
+		"initial_max_lines":     initialMaxLines,
 		"request_timeout":       requestTimeout.String(),
 		"retry_backoff_min":     backoffMin.String(),
 		"retry_backoff_max":     effectiveBackoffMax.String(),
@@ -170,7 +201,12 @@ func main() {
 					state = &fileState{}
 					states[path] = state
 				}
-				lines, st, err := readNewLines(path, state, maxLineBytes)
+				// 读取限流：避免一次性读出海量行导致内存暴涨/推送洪峰。
+				remaining := maxPending - len(pending)
+				if remaining <= 0 {
+					break
+				}
+				lines, st, err := readNewLines(path, state, maxLineBytes, remaining, initialTailBytes, initialMaxLines)
 				if err != nil {
 					logrus.WithError(err).Warnf("读取日志失败: %s", path)
 					continue
@@ -327,7 +363,7 @@ func loadConfig(path string) (*agentConfig, error) {
 	return cfg, nil
 }
 
-func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, readStats, error) {
+func readNewLines(path string, state *fileState, maxLineBytes int, maxLines int, initialTailBytes int64, initialMaxLines int) ([]string, readStats, error) {
 	stats := readStats{path: path}
 	stats.maxLineBytes = maxLineBytes
 	info, err := os.Stat(path)
@@ -336,9 +372,11 @@ func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, re
 	}
 	size := info.Size()
 	stats.fileSize = size
+	// 文件被截断/轮转：offset 回到 0，视为“首次读取”场景。
 	if size < state.offset {
 		state.offset = 0
 		state.partial = ""
+		state.lastSize = 0
 	}
 	if size == state.offset {
 		return nil, stats, nil
@@ -349,6 +387,15 @@ func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, re
 		return nil, stats, err
 	}
 	defer file.Close()
+
+	// 首次读取：如果文件很大，则从尾部截断读取，避免一次性回放历史日志。
+	// 触发条件：offset=0 且 lastSize=0（包含“截断/轮转后 offset 重置”的场景）。
+	skipFirstPartial := false
+	isFirstRead := state.offset == 0 && state.lastSize == 0 && state.partial == ""
+	if isFirstRead && initialTailBytes > 0 && size > initialTailBytes {
+		state.offset = size - initialTailBytes
+		skipFirstPartial = true
+	}
 
 	stats.from = state.offset
 	if _, err := file.Seek(state.offset, io.SeekStart); err != nil {
@@ -361,6 +408,27 @@ func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, re
 	lines := []string{}
 	seed := state.partial
 	state.partial = ""
+
+	// 如果从文件中间开始读取（tail 截断），先丢弃“半行”，从下一行开始，避免产生残缺 JSON。
+	// 注意：这一步也要计入 offset 和 stats.bytes。
+	if skipFirstPartial {
+		discarded, err := discardUntilNextNewline(reader)
+		if err != nil {
+			return nil, stats, err
+		}
+		if discarded > 0 {
+			state.offset += discarded
+			stats.bytes += discarded
+		}
+		seed = ""
+	}
+
+	// 首次读取时的额外行数上限（仍会受 maxLines 限制）。
+	if isFirstRead && initialMaxLines > 0 {
+		if maxLines <= 0 || initialMaxLines < maxLines {
+			maxLines = initialMaxLines
+		}
+	}
 
 	var lastOverlongLogged time.Time
 	logOverlong := func(actualLineBytes int64, from, to int64) {
@@ -379,6 +447,9 @@ func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, re
 	}
 
 	for {
+		if maxLines > 0 && stats.lines >= maxLines {
+			break
+		}
 		line, overlong, bytesRead, hasNewline, eof, err, actualLineBytes := readOneLineLimited(reader, maxLineBytes, seed)
 		seed = ""
 		if bytesRead > 0 {
@@ -417,6 +488,33 @@ func readNewLines(path string, state *fileState, maxLineBytes int) ([]string, re
 	state.lastSize = size
 	stats.to = state.offset
 	return lines, stats, nil
+}
+
+// discardUntilNextNewline consumes bytes until the next '\n' (inclusive) or EOF.
+// It returns the number of bytes discarded from reader.
+func discardUntilNextNewline(reader *bufio.Reader) (int64, error) {
+	var discarded int64
+	for {
+		frag, err := reader.ReadSlice('\n')
+		if len(frag) > 0 {
+			discarded += int64(len(frag))
+			// got newline
+			if frag[len(frag)-1] == '\n' {
+				return discarded, nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// continue consuming the same long line
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return discarded, nil
+		}
+		return discarded, err
+	}
 }
 
 // readOneLineLimited reads one logical line (terminated by '\n' or EOF) without ever buffering more than maxLineBytes.
@@ -547,6 +645,16 @@ func applyEnvOverrides(cfg *agentConfig) {
 	}
 	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_FLUSH_INTERVAL"); ok && strings.TrimSpace(v) != "" {
 		cfg.FlushInterval = v
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_INITIAL_TAIL_BYTES"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			cfg.InitialTailBytes = n
+		}
+	}
+	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_INITIAL_MAX_LINES"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.InitialMaxLines = n
+		}
 	}
 	if v, ok := os.LookupEnv("NGINXPULSE_AGENT_BATCH_SIZE"); ok && strings.TrimSpace(v) != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
